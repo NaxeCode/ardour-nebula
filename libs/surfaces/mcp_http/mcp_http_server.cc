@@ -23,7 +23,9 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
+#include <functional>
 #include <iomanip>
 #include <map>
 #include <memory>
@@ -35,6 +37,9 @@
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+
+#include <glibmm/fileutils.h>
+#include <glibmm/miscutils.h>
 
 #include "pbd/basename.h"
 #include "pbd/controllable.h"
@@ -49,8 +54,11 @@
 
 #include "ardour/amp.h"
 #include "ardour/audio_track.h"
+#include "ardour/audioengine.h"
 #include "ardour/audioregion.h"
 #include "ardour/dB.h"
+#include "ardour/filename_extensions.h"
+#include "ardour/import_status.h"
 #include "ardour/internal_send.h"
 #include "ardour/location.h"
 #include "ardour/midi_model.h"
@@ -70,10 +78,14 @@
 #include "ardour/selection.h"
 #include "ardour/session.h"
 #include "ardour/session_event.h"
+#include "ardour/smf_source.h"
 #include "ardour/source.h"
 #include "ardour/stripable.h"
 #include "ardour/tempo.h"
 #include "ardour/track.h"
+#include "ardour/utils.h"
+
+#include "control_protocol/control_protocol.h"
 
 #include "mcp_http_server.h"
 
@@ -232,7 +244,8 @@ canonical_tool_name (std::string tool_name)
 		"region",
 		"plugin",
 		"midi_region",
-		"midi_note"
+		"midi_note",
+		"audio"
 	};
 
 	for (size_t i = 0; i < (sizeof (known_groups) / sizeof (known_groups[0])); ++i) {
@@ -7991,6 +8004,606 @@ dispatch_midi_region_tool_call (ARDOUR::Session& session, const std::string& too
 	return false;
 }
 
+/* Run fn on the surface's event loop (the GUI thread), where the editor
+ * also adds tracks, regions and sessions, and wait for it.
+ */
+static void
+run_in_event_loop (PBD::EventLoop* event_loop, const std::function<void ()>& fn)
+{
+	if (!event_loop) {
+		fn ();
+		return;
+	}
+
+	std::mutex              done_mutex;
+	std::condition_variable done_cv;
+	bool                    done = false;
+
+	const bool queued = event_loop->call_slot (MISSING_INVALIDATOR, [&] () {
+		fn ();
+		{
+			std::lock_guard<std::mutex> lk (done_mutex);
+			done = true;
+		}
+		done_cv.notify_one (); });
+
+	if (!queued) {
+		fn ();
+		return;
+	}
+
+	std::unique_lock<std::mutex> lk (done_mutex);
+	done_cv.wait (lk, [&] { return done; });
+}
+
+/* Copy an audio file into the session (converting its sample rate if
+ * needed), one source per channel, as the editor's import does.
+ */
+static bool
+import_audio_file_sources (ARDOUR::Session& session, const std::string& path, ARDOUR::SourceList& sources, std::string& error)
+{
+	error.clear ();
+	sources.clear ();
+
+	if (path.empty ()) {
+		error = "Missing path";
+		return false;
+	}
+	if (!Glib::path_is_absolute (path)) {
+		error = "path must be absolute";
+		return false;
+	}
+	if (!Glib::file_test (path, Glib::FILE_TEST_IS_REGULAR)) {
+		error = "File not found: " + path;
+		return false;
+	}
+	if (ARDOUR::SMFSource::safe_midi_file_extension (path)) {
+		error = "path is a MIDI file; use the midi_note tools";
+		return false;
+	}
+
+	ARDOUR::ImportStatus status;
+	status.paths.push_back (path);
+	status.current                 = 1;
+	status.total                   = 1;
+	status.quality                 = ARDOUR::SrcBest;
+	status.freeze                  = false;
+	status.replace_existing_source = false;
+	status.split_midi_channels     = false;
+	status.import_markers          = false;
+	status.midi_track_name_source  = ARDOUR::SMFFileAndTrackName;
+	status.all_done                = false;
+	status.done                    = false;
+	status.cancel                  = false;
+
+	session.import_files (status);
+
+	for (ARDOUR::SourceList::const_iterator s = status.sources.begin (); s != status.sources.end (); ++s) {
+		if (*s && !(*s)->empty ()) {
+			sources.push_back (*s);
+		}
+	}
+
+	if (status.cancel || sources.empty ()) {
+		error = "Could not import " + path;
+		return false;
+	}
+
+	return true;
+}
+
+/* A region of the whole of the imported file, named after it */
+static std::shared_ptr<ARDOUR::Region>
+whole_file_audio_region (const ARDOUR::SourceList& sources, const std::string& path, const std::string& requested_name)
+{
+	std::string name = requested_name.empty () ? std::string (PBD::basename_nosuffix (path)) : requested_name;
+	while (ARDOUR::RegionFactory::region_by_name (name)) {
+		name = ARDOUR::bump_name_once (name, '.');
+	}
+
+	PBD::PropertyList plist;
+	plist.add (ARDOUR::Properties::start, Temporal::timecnt_t (Temporal::AudioTime));
+	plist.add (ARDOUR::Properties::length, sources.front ()->length ());
+	plist.add (ARDOUR::Properties::name, name);
+	plist.add (ARDOUR::Properties::layer, 0);
+	plist.add (ARDOUR::Properties::whole_file, true);
+	plist.add (ARDOUR::Properties::external, true);
+	plist.add (ARDOUR::Properties::opaque, true);
+
+	return ARDOUR::RegionFactory::create (sources, plist);
+}
+
+static bool
+parse_optional_position (const pt::ptree& root, samplepos_t& position, bool& have_position, std::string& error)
+{
+	have_position = false;
+
+	const std::optional<int64_t> sample_opt = get_optional_std<int64_t> (root, "params.arguments.sample");
+	if (sample_opt && *sample_opt < 0) {
+		error = "Invalid sample (expected >= 0)";
+		return false;
+	}
+
+	samplepos_t bbt_sample      = 0;
+	bool        have_bbt_target = false;
+	if (!parse_optional_bbt_target_sample (root, "params.arguments", bbt_sample, have_bbt_target, error)) {
+		return false;
+	}
+
+	if (sample_opt && have_bbt_target) {
+		error = "Provide either sample or bar+beat, not both";
+		return false;
+	}
+
+	if (sample_opt) {
+		position      = (samplepos_t)*sample_opt;
+		have_position = true;
+	} else if (have_bbt_target) {
+		position      = bbt_sample;
+		have_position = true;
+	}
+
+	return true;
+}
+
+static std::string
+imported_region_json (const std::shared_ptr<ARDOUR::Region>& region, const std::shared_ptr<ARDOUR::Route>& track, const std::string& path, size_t channels)
+{
+	const samplepos_t start_sample = region->position_sample ();
+	const samplepos_t end_sample   = start_sample + region->length_samples ();
+
+	std::ostringstream ss;
+	ss << "{\"regionId\":\"" << json_escape (region->id ().to_s ()) << "\""
+	   << ",\"name\":\"" << json_escape (region->name ()) << "\""
+	   << ",\"trackId\":\"" << json_escape (track->id ().to_s ()) << "\""
+	   << ",\"trackName\":\"" << json_escape (track->name ()) << "\""
+	   << ",\"path\":\"" << json_escape (path) << "\""
+	   << ",\"channels\":" << channels
+	   << ",\"startSample\":" << start_sample
+	   << ",\"endSample\":" << end_sample
+	   << ",\"lengthSamples\":" << region->length_samples ()
+	   << ",\"startBbt\":" << bbt_json_at_sample (start_sample)
+	   << ",\"endBbt\":" << bbt_json_at_sample (end_sample)
+	   << "}";
+	return ss.str ();
+}
+
+static std::shared_ptr<ARDOUR::AudioTrack>
+audio_track_by_mcp_id (ARDOUR::Session& session, const std::string& id, std::string& error)
+{
+	const std::shared_ptr<ARDOUR::Route> route = route_by_mcp_id (session, id);
+	if (!route) {
+		error = "Route not found";
+		return std::shared_ptr<ARDOUR::AudioTrack> ();
+	}
+
+	const std::shared_ptr<ARDOUR::AudioTrack> track = std::dynamic_pointer_cast<ARDOUR::AudioTrack> (route);
+	if (!track) {
+		error = "Route is not an audio track";
+	}
+	return track;
+}
+
+static std::string
+handle_audio_import_tool (ARDOUR::Session& session, PBD::EventLoop* event_loop, const pt::ptree& root, const std::string& id)
+{
+	Temporal::TempoMap::fetch ();
+
+	const std::string path     = root.get<std::string> ("params.arguments.path", "");
+	const std::string track_id = root.get<std::string> ("params.arguments.trackId", "");
+	const std::string name     = root.get<std::string> ("params.arguments.name", "");
+
+	samplepos_t position      = 0;
+	bool        have_position = false;
+	std::string error;
+	if (!parse_optional_position (root, position, have_position, error)) {
+		return jsonrpc_error (id, -32602, error);
+	}
+	if (!have_position) {
+		position = session.current_start_sample ();
+	}
+
+	std::shared_ptr<ARDOUR::AudioTrack> track;
+	if (!track_id.empty ()) {
+		track = audio_track_by_mcp_id (session, track_id, error);
+		if (!track) {
+			return jsonrpc_error (id, -32602, error);
+		}
+	}
+
+	ARDOUR::SourceList sources;
+	if (!import_audio_file_sources (session, path, sources, error)) {
+		return jsonrpc_error (id, -32000, error);
+	}
+
+	std::shared_ptr<ARDOUR::Region> region;
+
+	run_in_event_loop (event_loop, [&] () {
+		const std::shared_ptr<ARDOUR::Region> whole_file = whole_file_audio_region (sources, path, name);
+		if (!whole_file) {
+			error = "Failed to create region";
+			return;
+		}
+
+		if (!track) {
+			const uint32_t in_chans  = sources.size ();
+			uint32_t       out_chans = in_chans;
+			if ((ARDOUR::Config->get_output_auto_connect () & ARDOUR::AutoConnectMaster) && session.master_out ()) {
+				out_chans = session.master_out ()->n_inputs ().n_audio ();
+			}
+
+			ARDOUR::AudioTrackList tracks = session.new_audio_track (in_chans, out_chans, std::shared_ptr<ARDOUR::RouteGroup> (), 1, whole_file->name (), ARDOUR::PresentationInfo::max_order, ARDOUR::Normal, true);
+			if (tracks.empty ()) {
+				error = "Failed to create audio track";
+				return;
+			}
+			track = tracks.front ();
+		}
+
+		const std::shared_ptr<ARDOUR::Playlist> playlist = track->playlist ();
+		if (!playlist) {
+			error = "Track has no playlist";
+			return;
+		}
+
+		region = ARDOUR::RegionFactory::create (whole_file, true);
+
+		session.begin_reversible_command ("import audio");
+		playlist->clear_changes ();
+		playlist->clear_owned_changes ();
+		playlist->add_region (region, Temporal::timepos_t (position));
+		playlist->rdiff_and_add_command (&session);
+		session.commit_reversible_command ();
+	});
+
+	if (!region) {
+		return jsonrpc_error (id, -32000, error.empty () ? "Import failed" : error);
+	}
+
+	return jsonrpc_result (
+	    id,
+	    std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"Audio imported\"}],\"structuredContent\":") + imported_region_json (region, track, path, sources.size ()) + "}");
+}
+
+static std::string
+handle_region_replace_audio_tool (ARDOUR::Session& session, PBD::EventLoop* event_loop, const pt::ptree& root, const std::string& id)
+{
+	Temporal::TempoMap::fetch ();
+
+	const std::string path = root.get<std::string> ("params.arguments.path", "");
+
+	std::shared_ptr<ARDOUR::Region> old_region;
+	std::string                     resolved_via;
+	std::string                     error;
+	if (!resolve_region_argument_or_selected_at_playhead (session, root, "params.arguments", old_region, resolved_via, error)) {
+		return jsonrpc_error (id, -32602, error);
+	}
+	if (!std::dynamic_pointer_cast<ARDOUR::AudioRegion> (old_region)) {
+		return jsonrpc_error (id, -32602, "Region is not an audio region");
+	}
+	if (old_region->locked ()) {
+		return jsonrpc_error (id, -32602, "Region is locked");
+	}
+
+	const std::shared_ptr<ARDOUR::Playlist> playlist = old_region->playlist ();
+	if (!playlist) {
+		return jsonrpc_error (id, -32000, "Region has no playlist");
+	}
+
+	std::shared_ptr<ARDOUR::Track> track;
+	{
+		std::shared_ptr<ARDOUR::RouteList const> routes = session.get_routes ();
+		for (ARDOUR::RouteList::const_iterator r = routes->begin (); r != routes->end (); ++r) {
+			std::shared_ptr<ARDOUR::Track> t = std::dynamic_pointer_cast<ARDOUR::Track> (*r);
+			if (t && t->playlist () == playlist) {
+				track = t;
+				break;
+			}
+		}
+	}
+	if (!track) {
+		return jsonrpc_error (id, -32000, "Region is not on a track");
+	}
+
+	ARDOUR::SourceList sources;
+	if (!import_audio_file_sources (session, path, sources, error)) {
+		return jsonrpc_error (id, -32000, error);
+	}
+
+	const std::string old_region_id = old_region->id ().to_s ();
+	std::shared_ptr<ARDOUR::Region> region;
+
+	run_in_event_loop (event_loop, [&] () {
+		const std::shared_ptr<ARDOUR::Region> whole_file = whole_file_audio_region (sources, path, std::string ());
+		if (!whole_file) {
+			error = "Failed to create region";
+			return;
+		}
+
+		region = ARDOUR::RegionFactory::create (whole_file, true);
+		region->set_layer (old_region->layer ());
+
+		session.begin_reversible_command ("replace region audio");
+		playlist->clear_changes ();
+		playlist->clear_owned_changes ();
+		playlist->replace_region (old_region, region, old_region->position ());
+		playlist->rdiff_and_add_command (&session);
+		session.commit_reversible_command ();
+	});
+
+	if (!region) {
+		return jsonrpc_error (id, -32000, error.empty () ? "Replace failed" : error);
+	}
+
+	std::string structured = imported_region_json (region, track, path, sources.size ());
+	structured.insert (structured.size () - 1, ",\"replacedRegionId\":\"" + json_escape (old_region_id) + "\",\"resolvedVia\":\"" + json_escape (resolved_via) + "\"");
+
+	return jsonrpc_result (
+	    id,
+	    std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"Region audio replaced\"}],\"structuredContent\":") + structured + "}");
+}
+
+static std::string
+handle_track_replace_audio_tool (ARDOUR::Session& session, PBD::EventLoop* event_loop, const pt::ptree& root, const std::string& id)
+{
+	Temporal::TempoMap::fetch ();
+
+	const std::string track_id = root.get<std::string> ("params.arguments.id", "");
+	const std::string path     = root.get<std::string> ("params.arguments.path", "");
+
+	if (track_id.empty ()) {
+		return jsonrpc_error (id, -32602, "Missing track id");
+	}
+
+	std::string                         error;
+	std::shared_ptr<ARDOUR::AudioTrack> track = audio_track_by_mcp_id (session, track_id, error);
+	if (!track) {
+		return jsonrpc_error (id, -32602, error);
+	}
+
+	const std::shared_ptr<ARDOUR::Playlist> playlist = track->playlist ();
+	if (!playlist) {
+		return jsonrpc_error (id, -32000, "Track has no playlist");
+	}
+
+	samplepos_t position      = 0;
+	bool        have_position = false;
+	if (!parse_optional_position (root, position, have_position, error)) {
+		return jsonrpc_error (id, -32602, error);
+	}
+
+	/* the new audio goes where the track's audio started */
+	const std::shared_ptr<ARDOUR::RegionList> old_regions = playlist->region_list ();
+	if (!have_position) {
+		position = session.current_start_sample ();
+		bool first = true;
+		for (ARDOUR::RegionList::const_iterator r = old_regions->begin (); r != old_regions->end (); ++r) {
+			if (first || (*r)->position_sample () < position) {
+				position = (*r)->position_sample ();
+				first    = false;
+			}
+		}
+	}
+
+	ARDOUR::SourceList sources;
+	if (!import_audio_file_sources (session, path, sources, error)) {
+		return jsonrpc_error (id, -32000, error);
+	}
+
+	std::vector<std::string>        removed_region_ids;
+	std::shared_ptr<ARDOUR::Region> region;
+
+	run_in_event_loop (event_loop, [&] () {
+		const std::shared_ptr<ARDOUR::Region> whole_file = whole_file_audio_region (sources, path, std::string ());
+		if (!whole_file) {
+			error = "Failed to create region";
+			return;
+		}
+
+		region = ARDOUR::RegionFactory::create (whole_file, true);
+
+		session.begin_reversible_command ("replace track audio");
+		playlist->clear_changes ();
+		playlist->clear_owned_changes ();
+		for (ARDOUR::RegionList::const_iterator r = old_regions->begin (); r != old_regions->end (); ++r) {
+			removed_region_ids.push_back ((*r)->id ().to_s ());
+			playlist->remove_region (*r);
+		}
+		playlist->add_region (region, Temporal::timepos_t (position));
+		playlist->rdiff_and_add_command (&session);
+		session.commit_reversible_command ();
+	});
+
+	if (!region) {
+		return jsonrpc_error (id, -32000, error.empty () ? "Replace failed" : error);
+	}
+
+	std::string structured = imported_region_json (region, track, path, sources.size ());
+	structured.insert (structured.size () - 1, ",\"removedRegionIds\":" + json_string_array (removed_region_ids));
+
+	return jsonrpc_result (
+	    id,
+	    std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"Track audio replaced\"}],\"structuredContent\":") + structured + "}");
+}
+
+static std::string
+handle_tracks_remove_tool (ARDOUR::Session& session, PBD::EventLoop* event_loop, const pt::ptree& root, const std::string& id)
+{
+	std::vector<std::string> ids;
+	const boost::optional<const pt::ptree&> ids_node = root.get_child_optional ("params.arguments.ids");
+	if (ids_node) {
+		for (pt::ptree::const_iterator i = ids_node->begin (); i != ids_node->end (); ++i) {
+			ids.push_back (i->second.get_value<std::string> ());
+		}
+	}
+	if (ids.empty ()) {
+		return jsonrpc_error (id, -32602, "Missing ids (array of track or bus ids)");
+	}
+
+	std::shared_ptr<ARDOUR::RouteList> routes (new ARDOUR::RouteList);
+	std::vector<std::string>           names;
+	for (std::vector<std::string>::const_iterator i = ids.begin (); i != ids.end (); ++i) {
+		const std::shared_ptr<ARDOUR::Route> route = route_by_mcp_id (session, *i);
+		if (!route) {
+			return jsonrpc_error (id, -32602, "Route not found: " + *i);
+		}
+		if (route->is_singleton () || route->is_auditioner ()) {
+			return jsonrpc_error (id, -32602, "Cannot remove " + route->name ());
+		}
+		if (std::find (routes->begin (), routes->end (), route) == routes->end ()) {
+			routes->push_back (route);
+			names.push_back (route->name ());
+		}
+	}
+
+	std::vector<std::string> removed_ids;
+	for (ARDOUR::RouteList::const_iterator r = routes->begin (); r != routes->end (); ++r) {
+		removed_ids.push_back ((*r)->id ().to_s ());
+	}
+
+	run_in_event_loop (event_loop, [&] () { session.remove_routes (routes); });
+
+	std::ostringstream structured;
+	structured << "{\"removedIds\":" << json_string_array (removed_ids)
+	           << ",\"removedNames\":" << json_string_array (names) << "}";
+
+	return jsonrpc_result (
+	    id,
+	    std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"Removed ") + std::to_string (removed_ids.size ()) + " route(s)\"}],\"structuredContent\":" + structured.str () + "}");
+}
+
+static std::string
+handle_session_open_tool (ARDOUR::Session& session, const pt::ptree& root, const std::string& id)
+{
+	std::string       path     = root.get<std::string> ("params.arguments.path", "");
+	std::string       snapshot = root.get<std::string> ("params.arguments.snapshotName", "");
+	const bool        save     = root.get<bool> ("params.arguments.save", true);
+
+	if (path.empty () || !Glib::path_is_absolute (path)) {
+		return jsonrpc_error (id, -32602, "path must be an absolute session folder or .ardour file");
+	}
+
+	/* a session file, or the session folder (and its snapshot) */
+	std::string folder = path;
+	if (Glib::file_test (path, Glib::FILE_TEST_IS_REGULAR)) {
+		if (path.size () < strlen (ARDOUR::statefile_suffix) || path.compare (path.size () - strlen (ARDOUR::statefile_suffix), std::string::npos, ARDOUR::statefile_suffix) != 0) {
+			return jsonrpc_error (id, -32602, "path is not an Ardour session file");
+		}
+		folder   = Glib::path_get_dirname (path);
+		snapshot = PBD::basename_nosuffix (path);
+	} else if (Glib::file_test (path, Glib::FILE_TEST_IS_DIR)) {
+		while (folder.size () > 1 && folder[folder.size () - 1] == G_DIR_SEPARATOR) {
+			folder.erase (folder.size () - 1);
+		}
+		if (snapshot.empty ()) {
+			snapshot = Glib::path_get_basename (folder);
+		}
+	} else {
+		return jsonrpc_error (id, -32602, "Session not found: " + path);
+	}
+
+	const std::string statefile = Glib::build_filename (folder, snapshot + ARDOUR::statefile_suffix);
+	if (!Glib::file_test (statefile, Glib::FILE_TEST_IS_REGULAR)) {
+		return jsonrpc_error (id, -32602, "No session file " + statefile);
+	}
+
+	if (ARDOUR::ControlProtocol::OpenSession.empty ()) {
+		return jsonrpc_error (id, -32000, "No user interface to open sessions with");
+	}
+
+	const std::string current = session.path ();
+	ARDOUR::ControlProtocol::OpenSession (folder, snapshot, save); /* EMIT SIGNAL */
+
+	std::ostringstream structured;
+	structured << "{\"requested\":true"
+	           << ",\"folder\":\"" << json_escape (folder) << "\""
+	           << ",\"snapshotName\":\"" << json_escape (snapshot) << "\""
+	           << ",\"savedCurrent\":" << (save ? "true" : "false")
+	           << ",\"closingSession\":\"" << json_escape (current) << "\"}";
+
+	return jsonrpc_result (
+	    id,
+	    std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"Opening session; this server restarts with it, so reconnect in a few seconds\"}],\"structuredContent\":") + structured.str () + "}");
+}
+
+static std::string
+handle_session_new_tool (ARDOUR::Session& session, const pt::ptree& root, const std::string& id)
+{
+	std::string path = root.get<std::string> ("params.arguments.path", "");
+	const bool  save = root.get<bool> ("params.arguments.save", true);
+
+	if (path.empty () || !Glib::path_is_absolute (path)) {
+		return jsonrpc_error (id, -32602, "path must be the absolute folder of the new session");
+	}
+	while (path.size () > 1 && path[path.size () - 1] == G_DIR_SEPARATOR) {
+		path.erase (path.size () - 1);
+	}
+
+	const std::string name = root.get<std::string> ("params.arguments.name", Glib::path_get_basename (path));
+	if (name.empty () || ARDOUR::legalize_for_path (name) != name) {
+		return jsonrpc_error (id, -32602, "Invalid session name");
+	}
+	if (Glib::file_test (Glib::build_filename (path, name + ARDOUR::statefile_suffix), Glib::FILE_TEST_EXISTS)) {
+		return jsonrpc_error (id, -32602, "A session already exists there; use session/open");
+	}
+	if (!Glib::file_test (Glib::path_get_dirname (path), Glib::FILE_TEST_IS_DIR)) {
+		return jsonrpc_error (id, -32602, "Parent folder does not exist");
+	}
+	if (!ARDOUR::AudioEngine::instance ()->running ()) {
+		return jsonrpc_error (id, -32000, "Audio engine is not running");
+	}
+
+	if (ARDOUR::ControlProtocol::NewSession.empty ()) {
+		return jsonrpc_error (id, -32000, "No user interface to create sessions with");
+	}
+
+	const std::string current = session.path ();
+	ARDOUR::ControlProtocol::NewSession (path, name, save); /* EMIT SIGNAL */
+
+	std::ostringstream structured;
+	structured << "{\"requested\":true"
+	           << ",\"folder\":\"" << json_escape (path) << "\""
+	           << ",\"name\":\"" << json_escape (name) << "\""
+	           << ",\"sampleRate\":" << ARDOUR::AudioEngine::instance ()->sample_rate ()
+	           << ",\"savedCurrent\":" << (save ? "true" : "false")
+	           << ",\"closingSession\":\"" << json_escape (current) << "\"}";
+
+	return jsonrpc_result (
+	    id,
+	    std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"Creating session; this server restarts with it, so reconnect in a few seconds\"}],\"structuredContent\":") + structured.str () + "}");
+}
+
+static bool
+dispatch_media_tool_call (ARDOUR::Session& session, PBD::EventLoop* event_loop, const std::string& tool_name, const pt::ptree& root, const std::string& id, std::string& response)
+{
+	if (tool_name == "audio/import") {
+		response = handle_audio_import_tool (session, event_loop, root, id);
+		return true;
+	}
+	if (tool_name == "region/replace_audio") {
+		response = handle_region_replace_audio_tool (session, event_loop, root, id);
+		return true;
+	}
+	if (tool_name == "track/replace_audio") {
+		response = handle_track_replace_audio_tool (session, event_loop, root, id);
+		return true;
+	}
+	if (tool_name == "tracks/remove") {
+		response = handle_tracks_remove_tool (session, event_loop, root, id);
+		return true;
+	}
+	if (tool_name == "session/open") {
+		response = handle_session_open_tool (session, root, id);
+		return true;
+	}
+	if (tool_name == "session/new") {
+		response = handle_session_new_tool (session, root, id);
+		return true;
+	}
+
+	return false;
+}
+
 std::string
 MCPHttpServer::dispatch_jsonrpc (const std::string& payload) const
 {
@@ -8067,6 +8680,11 @@ MCPHttpServer::dispatch_jsonrpc (const std::string& payload) const
 			return jsonrpc_result (
 			    id,
 			    std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"") + json_escape (text) + "\"}]}");
+		}
+
+		std::string media_tool_response;
+		if (dispatch_media_tool_call (_session, _event_loop, tool_name, root, id, media_tool_response)) {
+			return media_tool_response;
 		}
 
 		std::string track_tool_response;
