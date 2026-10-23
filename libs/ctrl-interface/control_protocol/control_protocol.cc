@@ -62,6 +62,8 @@ PBD::Signal<void()> ControlProtocol::VerticalZoomOutSelected;
 PBD::Signal<void()>          ControlProtocol::StepTracksDown;
 PBD::Signal<void()>          ControlProtocol::StepTracksUp;
 PBD::Signal<void(std::weak_ptr<PluginInsert> )> ControlProtocol::PluginSelected;
+PBD::Signal<void(std::string, std::string, bool)> ControlProtocol::OpenSession;
+PBD::Signal<void(std::string, std::string, bool)> ControlProtocol::NewSession;
 
 StripableNotificationList ControlProtocol::_last_selected;
 PBD::ScopedConnection ControlProtocol::selection_connection;

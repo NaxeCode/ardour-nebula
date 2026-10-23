@@ -129,6 +129,7 @@
 #include "temporal/time.h"
 
 #include "control_protocol/basic_ui.h"
+#include "control_protocol/control_protocol.h"
 
 #include "about.h"
 #include "actions.h"
@@ -446,6 +447,11 @@ ARDOUR_UI::ARDOUR_UI (int *argcp, char **argvp[], const char* localedir)
 	/* handle requests to quit (coming from JACK session) */
 
 	ARDOUR::Session::Quit.connect (forever_connections, MISSING_INVALIDATOR, std::bind (&ARDOUR_UI::finish, this), gui_context ());
+
+	/* handle requests from control surfaces to load or create a session */
+
+	ControlProtocol::OpenSession.connect (forever_connections, MISSING_INVALIDATOR, std::bind (&ARDOUR_UI::control_protocol_open_session, this, _1, _2, _3), gui_context ());
+	ControlProtocol::NewSession.connect (forever_connections, MISSING_INVALIDATOR, std::bind (&ARDOUR_UI::control_protocol_new_session, this, _1, _2, _3), gui_context ());
 
 	/* handle requests to deal with missing files */
 

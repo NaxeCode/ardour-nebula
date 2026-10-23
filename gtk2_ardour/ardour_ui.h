@@ -246,6 +246,9 @@ public:
 	bool ask_about_loading_existing_session (const std::string& session_path);
 	int load_session_from_startup_fsm ();
 
+	void control_protocol_open_session (std::string const& path, std::string const& snapshot, bool save_first);
+	void control_protocol_new_session (std::string const& path, std::string const& name, bool save_first);
+
 	bool loading_session () const { return _loading_session; }
 
 	/// @return true if session was successfully unloaded.
@@ -492,6 +495,9 @@ private:
 
 	void audio_midi_setup_reconfigure_done (int response, std::string path, std::string snapshot, std::string mix_template);
 	int  load_session_stage_two (const std::string& path, const std::string& snapshot, std::string mix_template = std::string());
+	bool close_session_for_control_protocol (bool save_first);
+	void open_session_for_control_protocol (std::string path, std::string snapshot, bool save_first);
+	void new_session_for_control_protocol (std::string path, std::string name, bool save_first);
 	void audio_midi_setup_for_new_session_done (int response, std::string path, std::string snapshot, std::string session_template, ARDOUR::BusProfile const&, bool unnamed, Temporal::TimeDomain domain);
 	sigc::connection _engine_dialog_connection;
 

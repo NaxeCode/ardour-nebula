@@ -84,6 +84,14 @@ public:
 	static PBD::Signal<void()> StepTracksUp;
 	static PBD::Signal<void(std::weak_ptr<ARDOUR::PluginInsert> )> PluginSelected;
 
+	/* ask the GUI to load or create a session: session folder, snapshot
+	 * (or session) name, and whether to save the current session first.
+	 * The current session, and with it the control protocol that asked,
+	 * goes away.
+	 */
+	static PBD::Signal<void(std::string, std::string, bool)> OpenSession;
+	static PBD::Signal<void(std::string, std::string, bool)> NewSession;
+
 	void add_stripable_to_selection (std::shared_ptr<ARDOUR::Stripable>);
 	void set_stripable_selection (std::shared_ptr<ARDOUR::Stripable>);
 	void toggle_stripable_selection (std::shared_ptr<ARDOUR::Stripable>);

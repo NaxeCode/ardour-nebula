@@ -55,6 +55,7 @@
 #include "ardour/filename_extensions.h"
 #include "ardour/plugin_manager.h"
 #include "ardour/profile.h"
+#include "ardour/rc_configuration.h"
 #include "ardour/session.h"
 #include "ardour/session_utils.h"
 #include "ardour/session_state_utils.h"
@@ -332,6 +333,65 @@ ARDOUR_UI::close_session()
 /** @param snap_name Snapshot name (without .ardour suffix).
  *  @return -2 if the load failed because we are not connected to the AudioEngine.
  */
+void
+ARDOUR_UI::control_protocol_open_session (std::string const& path, std::string const& snapshot, bool save_first)
+{
+	/* Defer: the control protocol that asked is still answering the
+	 * request, and unloading the session destroys it.
+	 */
+	Glib::signal_timeout ().connect_once (sigc::bind (sigc::mem_fun (*this, &ARDOUR_UI::open_session_for_control_protocol), path, snapshot, save_first), 250);
+}
+
+void
+ARDOUR_UI::control_protocol_new_session (std::string const& path, std::string const& name, bool save_first)
+{
+	Glib::signal_timeout ().connect_once (sigc::bind (sigc::mem_fun (*this, &ARDOUR_UI::new_session_for_control_protocol), path, name, save_first), 250);
+}
+
+bool
+ARDOUR_UI::close_session_for_control_protocol (bool save_first)
+{
+	if (session_load_in_progress || _loading_session) {
+		return false;
+	}
+
+	if (!_session) {
+		return true;
+	}
+
+	if (save_first) {
+		_session->save_state ("");
+	}
+
+	/* the control protocol was told what happens to unsaved changes,
+	 * so do not ask again.
+	 */
+	return unload_session (false, true) == 0;
+}
+
+void
+ARDOUR_UI::open_session_for_control_protocol (std::string path, std::string snapshot, bool save_first)
+{
+	if (!close_session_for_control_protocol (save_first)) {
+		return;
+	}
+
+	load_session (path, snapshot);
+}
+
+void
+ARDOUR_UI::new_session_for_control_protocol (std::string path, std::string name, bool save_first)
+{
+	if (!close_session_for_control_protocol (save_first)) {
+		return;
+	}
+
+	BusProfile bus_profile;
+	bus_profile.master_out_channels = 2;
+
+	build_session_stage_two (path, name, std::string (), bus_profile, false, Config->get_preferred_time_domain ());
+}
+
 int
 ARDOUR_UI::load_session (const std::string& path, const std::string& snap_name, std::string mix_template)
 {
