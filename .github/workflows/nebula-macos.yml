@@ -15,6 +15,11 @@ on:
     paths-ignore: ['nebula/README.md']
   workflow_dispatch:
 
+# One build at a time, so a later run reuses the stack an earlier one cached.
+concurrency:
+  group: macos-dmg
+  cancel-in-progress: false
+
 env:
   # Ardour release this branch sits on; the build reads its version from it.
   ARDOUR_BASE_TAG: '9.8'
@@ -45,6 +50,7 @@ jobs:
         run: |
           recipe=$(find nebula/ardour-ci -type f | sort | xargs shasum -a 256 | shasum -a 256 | cut -c1-16)
           echo "stack=stack-${BUILD_STACK_REV:0:12}-$recipe" >> "$GITHUB_OUTPUT"
+          echo "stackrev=stack-${BUILD_STACK_REV:0:12}" >> "$GITHUB_OUTPUT"
 
       - name: Restore finished stack
         id: full
@@ -62,7 +68,12 @@ jobs:
             ${{ env.WORK }}/stacks
             ${{ env.WORK }}/downloads
           key: partial-${{ steps.keys.outputs.stack }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.pass }}
-          restore-keys: partial-${{ steps.keys.outputs.stack }}-
+          # A partial stack from an older recipe is fine too: each
+          # dependency's checkpoint is only reused if its own recipe and
+          # flags are unchanged.
+          restore-keys: |
+            partial-${{ steps.keys.outputs.stack }}-
+            partial-${{ steps.keys.outputs.stackrev }}-
 
       - name: Host tools
         if: steps.full.outputs.cache-hit != 'true'

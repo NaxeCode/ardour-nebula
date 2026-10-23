@@ -115,6 +115,9 @@ deps_build() {
   # cairographics.org also drops TLS handshakes. Replace every archive this
   # recipe fetches from it, including the ones reached after pixman.
   run perl -0pi -e 's@https?://www\.cairographics\.org/releases/pixman-0\.42\.2\.tar\.gz@https://mirrors.omnios.org/pixman/pixman-0.42.2.tar.gz@g; s@https?://cairographics\.org/releases/cairo-1\.16\.0\.tar\.xz@https://mirrors.omnios.org/cairo/cairo-1.16.0.tar.xz@g; s@https?://cairographics\.org/releases/cairomm-1\.12\.2\.tar\.gz@https://distfiles.macports.org/cairomm/cairomm-1.12.2.tar.gz@g' "$tools/x-applearm.sh"
+  # SourceForge no longer serves expat 2.8.4; libexpat's own release has the
+  # identical archive.
+  run perl -0pi -e 's@https?://downloads\.sourceforge\.net/project/expat/expat/2\.8\.4/expat-2\.8\.4\.tar\.xz@https://github.com/libexpat/libexpat/releases/download/R_2_8_4/expat-2.8.4.tar.xz@g' "$tools/x-applearm.sh"
   # Do not cache an HTTP error page or a truncated download under an archive
   # name: the upstream script only tests for a file's existence when resuming.
   run perl -0pi -e 's@echo "--- Downloading\.\. \$2"\ntest -f "\$\{SRCDIR\}/\$\{1\}" \|\| curl -k -L -o "\$\{SRCDIR\}/\$\{1\}" \$2@if test ! -f "\${SRCDIR}/\${1}"; then\n  echo "--- Downloading.. \$2"\n  curl -k --fail --location --retry 3 --output "\${SRCDIR}/\${1}.partial" "\$2" && mv "\${SRCDIR}/\${1}.partial" "\${SRCDIR}/\${1}"\nfi@g' "$tools/x-applearm.sh"
