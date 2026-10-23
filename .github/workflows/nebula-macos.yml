@@ -1,0 +1,178 @@
+# Builds an unsigned Ardour DMG for macOS on Apple Silicon, on GitHub's free
+# arm64 runners. The dependency stack is Ardour's own (ardour-build-tools,
+# x-applearm.sh), made to build natively on current Apple Clang by
+# nebula/ardour-ci (vendored from axsy/ardour-ci).
+#
+# The stack takes hours, so it is cached. A cold stack build runs in up to two
+# passes of one job each (6 h limit per job); a pass that runs out of time
+# caches its finished dependencies, and the next pass resumes from them.
+name: macOS arm64 DMG
+
+on:
+  push:
+    branches: [nebula-build]
+    tags: ['nebula-*']
+    paths-ignore: ['nebula/README.md']
+  workflow_dispatch:
+
+env:
+  # Ardour release this branch sits on; the build reads its version from it.
+  ARDOUR_BASE_TAG: '9.8'
+  # The build-stack revision of the official arm64 nightly, from
+  # https://nightly.ardour.org/i/A_MAC_arm64/info.txt ("build-stack:").
+  BUILD_STACK_REV: 3cbf14d1c2c556f327534141c848ff63460df91f
+  # Absolute paths are baked into the stack, so every job uses the same one.
+  WORK: /Users/runner/ardour-ci-work
+
+jobs:
+  stack:
+    name: Dependency stack (pass ${{ matrix.pass }})
+    runs-on: macos-15
+    timeout-minutes: 350
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        pass: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: nebula
+          fetch-depth: 1
+
+      - name: Cache keys
+        id: keys
+        run: |
+          recipe=$(find nebula/ardour-ci -type f | sort | xargs shasum -a 256 | shasum -a 256 | cut -c1-16)
+          echo "stack=stack-${BUILD_STACK_REV:0:12}-$recipe" >> "$GITHUB_OUTPUT"
+
+      - name: Restore finished stack
+        id: full
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.WORK }}/stacks
+          key: ${{ steps.keys.outputs.stack }}
+          lookup-only: true
+
+      - name: Restore partial stack and downloads
+        if: steps.full.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.WORK }}/stacks
+            ${{ env.WORK }}/downloads
+          key: partial-${{ steps.keys.outputs.stack }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.pass }}
+          restore-keys: partial-${{ steps.keys.outputs.stack }}-
+
+      - name: Host tools
+        if: steps.full.outputs.cache-hit != 'true'
+        run: |
+          sw_vers; clang --version; df -h "$HOME"; sysctl -n hw.ncpu
+          # intltool's configure needs Perl's XML::Parser.
+          perl -MXML::Parser -e1 || { brew install cpanminus && cpanm --notest XML::Parser; }
+
+      - name: Build stack
+        id: build
+        if: steps.full.outputs.cache-hit != 'true'
+        # Stop early enough to cache what finished before the job limit.
+        timeout-minutes: 310
+        continue-on-error: true
+        run: |
+          nebula/ardour-ci/bin/ardour-ci --work-dir "$WORK" --stack-rev "$BUILD_STACK_REV" --jobs "$(sysctl -n hw.ncpu)" deps build
+
+      - name: Trim the stack for caching
+        if: always() && steps.full.outputs.cache-hit != 'true'
+        run: |
+          root="$WORK/stacks/$BUILD_STACK_REV"
+          rm -rf "$root/gtk/src"
+          # Each checkpoint snapshot is a full copy of the install tree (an
+          # APFS clone on disk, a real copy in a cache tarball). Resuming
+          # only restores the newest one, so empty the older ones.
+          snaps="$root/.resume/snapshots"
+          if [ -d "$snaps" ]; then
+            newest=$(ls "$snaps" | grep -v '\.tmp\.' | sort | tail -n 1)
+            for s in "$snaps"/*; do
+              [ "$(basename "$s")" = "$newest" ] && continue
+              rm -rf "$s"; case "$s" in *.tmp.*) ;; *) mkdir "$s";; esac
+            done
+          fi
+          du -sh "$WORK"/* || true
+
+      - name: Save finished stack
+        if: steps.full.outputs.cache-hit != 'true' && steps.build.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.WORK }}/stacks
+          key: ${{ steps.keys.outputs.stack }}
+
+      - name: Save partial stack
+        if: always() && steps.full.outputs.cache-hit != 'true' && steps.build.outcome != 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.WORK }}/stacks
+            ${{ env.WORK }}/downloads
+          key: partial-${{ steps.keys.outputs.stack }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.pass }}
+
+      - name: Fail if the stack is still unfinished
+        if: matrix.pass == 2 && steps.full.outputs.cache-hit != 'true' && steps.build.outcome != 'success'
+        run: |
+          echo "::error::The stack did not finish in two passes; see the Build stack step. Re-running resumes from the cache."
+          exit 1
+
+  ardour:
+    name: Ardour and DMG
+    needs: stack
+    runs-on: macos-15
+    timeout-minutes: 350
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 30
+
+      - name: Fetch the release tag
+        # waf takes Ardour's version from `git describe`.
+        run: |
+          git fetch --no-tags --depth=30 origin "+refs/tags/$ARDOUR_BASE_TAG:refs/tags/$ARDOUR_BASE_TAG"
+          git describe HEAD
+
+      - name: Cache keys
+        id: keys
+        run: |
+          recipe=$(find nebula/ardour-ci -type f | sort | xargs shasum -a 256 | shasum -a 256 | cut -c1-16)
+          echo "stack=stack-${BUILD_STACK_REV:0:12}-$recipe" >> "$GITHUB_OUTPUT"
+
+      - name: Restore stack
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.WORK }}/stacks
+          key: ${{ steps.keys.outputs.stack }}
+          fail-on-cache-miss: true
+
+      - name: Build Ardour
+        run: |
+          nebula/ardour-ci/bin/ardour-ci --source "$GITHUB_WORKSPACE" --work-dir "$WORK" --stack-rev "$BUILD_STACK_REV" --jobs "$(sysctl -n hw.ncpu)" build
+
+      - name: Package DMG
+        run: |
+          nebula/ardour-ci/bin/ardour-ci --source "$GITHUB_WORKSPACE" --work-dir "$WORK" --stack-rev "$BUILD_STACK_REV" package
+          mkdir -p dist
+          cp "$WORK"/artifacts/*/Ardour-*.dmg dist/
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ardour-macos-arm64-dmg
+          path: dist/*.dmg
+          compression-level: 0
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/nebula-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.dmg --repo "$GITHUB_REPOSITORY" \
+            --title "Ardour $(git describe HEAD) (NaxeCode build, macOS arm64)" \
+            --notes "Unsigned build of Ardour from the GPL source, made by GitHub Actions. On first launch, right-click the app and choose Open."

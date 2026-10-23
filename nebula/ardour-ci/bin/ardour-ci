@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# A local macOS ARM64 build pipeline for a separately checked-out Ardour tree.
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+CI_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
+WORK_DIR=${ARDOUR_CI_WORK_DIR:-"$CI_ROOT/.work"}
+CONFIG_FILE="$WORK_DIR/config"
+LOCK_FILE="$WORK_DIR/build-stack.lock"
+NIGHTLY_INFO_URL=${ARDOUR_CI_NIGHTLY_INFO_URL:-"https://nightly.ardour.org/i/A_MAC_arm64/info.txt"}
+BUILD_STACK_URL=${ARDOUR_CI_BUILD_STACK_URL:-"git://git.ardour.org/ardour/ardour-build-tools.git"}
+DRY_RUN=0
+SOURCE_OVERRIDE=""
+STACK_REV_OVERRIDE=""
+JOBS=${ARDOUR_CI_JOBS:-"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"}
+
+usage() {
+cat <<'EOF'
+Usage: ardour-ci [--source PATH] [--work-dir PATH] [--jobs N] [--stack-rev SHA] [--dry-run] COMMAND
+
+Commands:
+  config set-source PATH   Save the Ardour source directory in local configuration.
+  config show              Show effective local configuration.
+  source status            Show the selected Ardour revision and worktree state.
+  doctor                   Check the macOS ARM64 build prerequisites.
+  deps sync                Lock the current official macOS ARM64 build-stack revision.
+  deps build               Build or reuse the isolated dependency stack.
+  build                    Configure and compile the selected Ardour revision.
+  package                  Create an unsigned public Ardour DMG.
+  all                      Run doctor, deps build, build, and package.
+  clean                    Remove only this pipeline's .work directory.
+
+The source checkout is never pulled, rebased, or checked out by this tool.
+EOF
+}
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+note() { printf '%s\n' "$*" >&2; }
+run() { printf '+ ' >&2; printf '%q ' "$@" >&2; printf '\n' >&2; [ "$DRY_RUN" -eq 1 ] || "$@"; }
+run_in_dir() {
+  local directory=$1
+  shift
+  printf '+ (cd %q && ' "$directory" >&2; printf '%q ' "$@" >&2; printf ')\n' >&2
+  [ "$DRY_RUN" -eq 1 ] || (cd "$directory" && "$@")
+}
+canonical_dir() { [ -d "$1" ] || die "directory does not exist: $1"; (cd "$1" && pwd -P); }
+ensure_work_dir() { mkdir -p "$WORK_DIR"; }
+write_file() { [ "$DRY_RUN" -eq 1 ] || { mkdir -p "$(dirname "$1")"; printf '%s\n' "$2" > "$1"; }; }
+read_config_source() { [ ! -f "$CONFIG_FILE" ] || sed -n 's/^source_path=//p' "$CONFIG_FILE" | head -n 1; }
+source_path() { local selected; if [ -n "$SOURCE_OVERRIDE" ]; then selected=$SOURCE_OVERRIDE; else selected=$(read_config_source); selected=${selected:-"$CI_ROOT/../ardour"}; fi; canonical_dir "$selected"; }
+require_source() { SOURCE_PATH=$(source_path); git -C "$SOURCE_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a Git checkout: $SOURCE_PATH"; }
+current_commit() { git -C "$SOURCE_PATH" rev-parse HEAD; }
+current_tag() { git -C "$SOURCE_PATH" describe --tags --exact-match HEAD 2>/dev/null || true; }
+read_locked_stack_rev() { [ ! -f "$LOCK_FILE" ] || sed -n 's/^build_stack_rev=//p' "$LOCK_FILE" | head -n 1; }
+stack_rev() { local revision; revision=${STACK_REV_OVERRIDE:-"$(read_locked_stack_rev)"}; [ -n "$revision" ] || die "no build-stack revision is locked; run: ardour-ci deps sync"; [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || die "invalid build-stack revision: $revision"; printf '%s\n' "$revision"; }
+stack_root() { printf '%s/stacks/%s\n' "$WORK_DIR" "$(stack_rev)"; }
+gtk_root() { printf '%s/gtk/inst\n' "$(stack_root)"; }
+ensure_stack() { local root; root=$(stack_root); [ -f "$root/.built-rev" ] && [ "$(cat "$root/.built-rev")" = "$(stack_rev)" ] && [ -d "$root/gtk/inst" ] || die "dependency stack is not built; run: ardour-ci deps build"; }
+command_exists() { command -v "$1" >/dev/null 2>&1; }
+instrument_stack_recipe() {
+  local tools=$1 recipe="$1/x-applearm.sh" transformed="$1/x-applearm.resumable.sh"
+  [ -f "$recipe" ] || die "build-stack recipe is missing: $recipe"
+  awk -f "$CI_ROOT/tools/instrument-x-applearm.awk" "$recipe" > "$transformed" || die "unsupported build-stack recipe; update the resumable recipe instrumenter"
+  [ -s "$transformed" ] || die "failed to instrument build-stack recipe"
+  grep -Fq '# Added by ardour-ci: per-dependency checkpoint and snapshot support.' "$transformed" || die "unsupported build-stack recipe; update the resumable recipe instrumenter"
+  chmod +x "$transformed"
+}
+
+doctor() {
+  [ "$(uname -s)" = Darwin ] || die "macOS is required"
+  [ "$(uname -m)" = arm64 ] || die "native Apple Silicon (arm64) is required"
+  local tool
+  for tool in git curl make patch perl python3 xcode-select hdiutil otool install_name_tool msgfmt; do command_exists "$tool" || die "required tool is unavailable: $tool"; done
+  xcode-select -p >/dev/null 2>&1 || die "Xcode Command Line Tools are not selected"
+  note "doctor: macOS ARM64 build prerequisites are available"
+}
+config_set_source() { [ "$#" -eq 1 ] || die "usage: ardour-ci config set-source PATH"; local selected; selected=$(canonical_dir "$1"); ensure_work_dir; write_file "$CONFIG_FILE" "source_path=$selected"; note "configured Ardour source: $selected"; }
+config_show() { printf 'source_path=%s\nwork_dir=%s\nlock_file=%s\nnightly_info_url=%s\n' "$(source_path)" "$WORK_DIR" "$LOCK_FILE" "$NIGHTLY_INFO_URL"; }
+source_status() { require_source; local branch tag dirty; branch=$(git -C "$SOURCE_PATH" symbolic-ref --short -q HEAD || printf detached); tag=$(current_tag); dirty=clean; [ -z "$(git -C "$SOURCE_PATH" status --porcelain)" ] || dirty=dirty; printf 'source_path=%s\nbranch=%s\ncommit=%s\ntag=%s\nworktree=%s\n' "$SOURCE_PATH" "$branch" "$(current_commit)" "${tag:-none}" "$dirty"; }
+
+deps_sync() {
+  ensure_work_dir
+  local response revision
+  if [ -n "$STACK_REV_OVERRIDE" ]; then revision=$STACK_REV_OVERRIDE
+  elif [ "$DRY_RUN" -eq 1 ]; then note "dry-run: would fetch $NIGHTLY_INFO_URL and update $LOCK_FILE"; return 0
+  else
+    response=$(curl -fsSL --retry 3 "$NIGHTLY_INFO_URL") || die "failed to fetch nightly host information"
+    revision=$(printf '%s\n' "$response" | grep -Eio 'build-stack([^0-9a-f]|&[a-z]+;)*[0-9a-f]{40}' | grep -Eio '[0-9a-f]{40}' | head -n 1)
+  fi
+  [ -n "${revision:-}" ] || die "build-stack revision was not found in nightly host information"
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || die "invalid build-stack revision: $revision"
+  write_file "$LOCK_FILE" "build_stack_rev=$revision"
+  note "locked build-stack revision: $revision"
+}
+deps_build() {
+  local revision root tools downloads resume
+  revision=$(stack_rev); root="$WORK_DIR/stacks/$revision"; tools="$WORK_DIR/build-tools/$revision"; downloads="$WORK_DIR/downloads"
+  if [ -f "$root/.built-rev" ] && [ "$(cat "$root/.built-rev")" = "$revision" ] && [ -d "$root/gtk/inst" ]; then note "dependency stack is ready: $root"; return; fi
+  ensure_work_dir
+  resume="$root/.resume"
+  [ -d "$tools/.git" ] || run git clone "$BUILD_STACK_URL" "$tools"
+  run git -C "$tools" fetch --tags origin
+  run git -C "$tools" checkout --detach "$revision"
+  # `checkout --detach` preserves local edits.  The recipe is deliberately
+  # patched below, so start every attempt from the locked revision's original.
+  run git -C "$tools" restore --source="$revision" --worktree x-applearm.sh
+  # ftpmirror.gnu.org is currently returning HTTP 502 responses for the
+  # readline/termcap archives.  Use GNU's primary archive host instead.
+  run perl -0pi -e 's@http://ftpmirror\.gnu\.org/@https://ftp.gnu.org/gnu/@g' "$tools/x-applearm.sh"
+  # pkgconfig.freedesktop.org intermittently drops TLS handshakes. Bazel keeps
+  # an immutable mirror of the identical pkg-config 0.29.2 release archive.
+  run perl -0pi -e 's@https?://pkg-?config\.freedesktop\.org/releases/pkg-config-0\.29\.2\.tar\.gz@https://mirror.bazel.build/pkgconfig.freedesktop.org/releases/pkg-config-0.29.2.tar.gz@g' "$tools/x-applearm.sh"
+  # www.freedesktop.org has the same TLS issue for the two remaining release
+  # archives used by this recipe. MacPorts mirrors the identical tarballs.
+  run perl -0pi -e 's@https?://www\.freedesktop\.org/software/fontconfig/release/fontconfig-2\.13\.1\.tar\.bz2@https://distfiles.macports.org/fontconfig/fontconfig-2.13.1.tar.bz2@g; s@https?://www\.freedesktop\.org/software/harfbuzz/release/harfbuzz-2\.6\.7\.tar\.xz@https://distfiles.macports.org/harfbuzz/harfbuzz-2.6.7.tar.xz@g' "$tools/x-applearm.sh"
+  # cairographics.org also drops TLS handshakes. Replace every archive this
+  # recipe fetches from it, including the ones reached after pixman.
+  run perl -0pi -e 's@https?://www\.cairographics\.org/releases/pixman-0\.42\.2\.tar\.gz@https://mirrors.omnios.org/pixman/pixman-0.42.2.tar.gz@g; s@https?://cairographics\.org/releases/cairo-1\.16\.0\.tar\.xz@https://mirrors.omnios.org/cairo/cairo-1.16.0.tar.xz@g; s@https?://cairographics\.org/releases/cairomm-1\.12\.2\.tar\.gz@https://distfiles.macports.org/cairomm/cairomm-1.12.2.tar.gz@g' "$tools/x-applearm.sh"
+  # Do not cache an HTTP error page or a truncated download under an archive
+  # name: the upstream script only tests for a file's existence when resuming.
+  run perl -0pi -e 's@echo "--- Downloading\.\. \$2"\ntest -f "\$\{SRCDIR\}/\$\{1\}" \|\| curl -k -L -o "\$\{SRCDIR\}/\$\{1\}" \$2@if test ! -f "\${SRCDIR}/\${1}"; then\n  echo "--- Downloading.. \$2"\n  curl -k --fail --location --retry 3 --output "\${SRCDIR}/\${1}.partial" "\$2" && mv "\${SRCDIR}/\${1}.partial" "\${SRCDIR}/\${1}"\nfi@g' "$tools/x-applearm.sh"
+  # libffi 3.4.2 needs the upstream Darwin ARM64 CFI fix on modern Apple Clang.
+  run perl -0pi -e "s@(src libffi-3\\.4\\.2 tar\\.gz [^\\n]+\\n)(PREFIX=.*nativebuild)@\$1patch --batch --forward -p1 < '$CI_ROOT/patches/libffi-3.4.2-darwin-arm64-cfi.patch'\\n\$2@g" "$tools/x-applearm.sh"
+  # gettext 0.21 applies noreturn to the handler pointer but not its default
+  # implementation; recent Apple Clang rejects that function-pointer mismatch.
+  if ! grep -Fq 'gettext-0.21-clang-noreturn-handler.patch' "$tools/x-applearm.sh"; then
+    run perl -0pi -e "s@(src gettext-0\\.21 tar\\.gz [^\\n]+\\n)@\$1patch --batch --forward -p1 < '$CI_ROOT/patches/gettext-0.21-clang-noreturn-handler.patch'\\n@g" "$tools/x-applearm.sh"
+  fi
+  # The recipe still names libffi 3.2.1's private include directory, but it
+  # builds libffi 3.4.2, which installs its public headers in include/.
+  run perl -0pi -e 's@-I\$\{BLDDEP\}/lib/libffi-3\.2\.1/include@-I\${BLDDEP}/include@g' "$tools/x-applearm.sh"
+  # Cairo 1.16 treats any compiler diagnostic from its pthread probe as a
+  # failed probe.  Apple Clang warns about the recipe's C++-only --stdlib flag
+  # while linking that C probe, which would otherwise disable all mutexes.
+  if ! grep -Fq 'cairo-1.16.0-pthread-probe-warning' "$tools/x-applearm.sh"; then
+    run perl -0pi -e 's@ax_cv_c_float_words_bigendian=no \\\n@# cairo-1.16.0-pthread-probe-warning\nCFLAGS="$CFLAGS -Wno-unused-command-line-argument" \\\nax_cv_c_float_words_bigendian=no \\\n@' "$tools/x-applearm.sh"
+  fi
+  # Python 2.7 predates Apple Silicon and rejects `arch`'s arm64 result.
+  if ! grep -Fq 'python-2.7.18-macos-arm64.patch' "$tools/x-applearm.sh"; then
+    run perl -0pi -e "s@(src Python-2\.7\.18 tar\.xz [^\n]+\n)(PREFIX=)@\$1patch -p1 < '$CI_ROOT/patches/python-2.7.18-macos-arm64.patch'\n\$2@" "$tools/x-applearm.sh"
+  fi
+  # GLib 2.56.4's GDBus generator imports distutils, removed in Python 3.12.
+  if ! grep -Fq 'glib-2.56.4-python-3.12.patch' "$tools/x-applearm.sh"; then
+    run perl -0pi -e "s@(src glib-2\\.56\\.4 tar\\.xz [^\\n]+\\n)@\$1patch --batch --forward -p1 < '$CI_ROOT/patches/glib-2.56.4-python-3.12.patch'\\n@g" "$tools/x-applearm.sh"
+  fi
+  # GLib 2.56.4 declares locals after g_return_val_if_fail(), which its
+  # strict C90 warning set treats as an error on modern Apple Clang.
+  if ! grep -Fq 'glib-2.56.4-c99-declarations.patch' "$tools/x-applearm.sh"; then
+    run perl -0pi -e "s@(src glib-2\\.56\\.4 tar\\.xz [^\\n]+\\n(?:patch --batch --forward -p1 < '$CI_ROOT/patches/glib-2.56.4-python-3.12.patch'\\n)?)@\$1patch --batch --forward -p1 < '$CI_ROOT/patches/glib-2.56.4-c99-declarations.patch'\\n@g" "$tools/x-applearm.sh"
+  fi
+  # HarfBuzz 2.6.7 upgrades cast-function-type warnings to errors in its
+  # headers. Apple Clang 17 diagnoses additional valid legacy FreeType casts.
+  if ! grep -Fq 'harfbuzz-2.6.7-apple-clang-cast-function-type.patch' "$tools/x-applearm.sh"; then
+    run perl -0pi -e "s@(src harfbuzz-2\\.6\\.7 tar\\.xz [^\\n]+\\n)@\$1patch --batch --forward -p1 < '$CI_ROOT/patches/harfbuzz-2.6.7-apple-clang-cast-function-type.patch'\\n@g" "$tools/x-applearm.sh"
+  fi
+  # Automake 1.14's py-compile imports imp, removed in Python 3.12.
+  if ! grep -Fq 'automake-1.14-python-3.12.patch' "$tools/x-applearm.sh"; then
+    run perl -0pi -e "s@(src automake-1\\.14\\.1 tar\\.gz [^\\n]+\\n)@\$1patch --batch --forward -p1 < '$CI_ROOT/patches/automake-1.14-python-3.12.patch'\\n@g" "$tools/x-applearm.sh"
+  fi
+  # libvorbis 1.3.4 passes this obsolete Darwin linker flag through CFLAGS.
+  # Recent Apple ld no longer accepts it when linking its test utility.
+  if ! grep -Fq 'libvorbis-1.3.4-remove-force-cpusubtype' "$tools/x-applearm.sh"; then
+    run perl -0pi -e "s@(src libvorbis-1\\.3\\.4 tar\\.gz [^\\n]+\\n)(autoconfbuild)@\$1# libvorbis-1.3.4-remove-force-cpusubtype\nperl -pi -e 's/ -force_cpusubtype_ALL//g' configure\n\$2@" "$tools/x-applearm.sh"
+  fi
+  [ "$DRY_RUN" -eq 1 ] || git -C "$tools" cat-file -e "$revision^{commit}" 2>/dev/null || die "build-stack revision is unavailable: $revision"
+  instrument_stack_recipe "$tools"
+  run mkdir -p "$root" "$downloads"
+  # A failed download is cached under the expected archive filename by the
+  # upstream recipe, so remove the known bad response before resuming.
+  if [ -f "$downloads/readline-8.2.tar.gz" ] && ! gzip -t "$downloads/readline-8.2.tar.gz" 2>/dev/null; then
+    run rm -f "$downloads/readline-8.2.tar.gz"
+  fi
+  if [ -f "$downloads/fontconfig-2.13.1.tar.bz2" ] && ! bzip2 -t "$downloads/fontconfig-2.13.1.tar.bz2" 2>/dev/null; then
+    run rm -f "$downloads/fontconfig-2.13.1.tar.bz2"
+  fi
+  if [ -f "$downloads/pixman-0.42.2.tar.gz" ] && ! gzip -t "$downloads/pixman-0.42.2.tar.gz" 2>/dev/null; then
+    run rm -f "$downloads/pixman-0.42.2.tar.gz"
+  fi
+  if [ -f "$downloads/cairo-1.16.0.tar.xz" ] && ! xz -t "$downloads/cairo-1.16.0.tar.xz" 2>/dev/null; then
+    run rm -f "$downloads/cairo-1.16.0.tar.xz"
+  fi
+  if [ -f "$downloads/cairomm-1.12.2.tar.gz" ] && ! gzip -t "$downloads/cairomm-1.12.2.tar.gz" 2>/dev/null; then
+    run rm -f "$downloads/cairomm-1.12.2.tar.gz"
+  fi
+  # GLib 2.56.4 uses legacy __sync pointer atomics that Apple Clang 15+
+  # diagnoses as integer-to-pointer conversions. Its cleanup macros also cast
+  # typed destructors to GDestroyNotify; newer Clang diagnoses that cast while
+  # building HarfBuzz with -Werror. HarfBuzz is C++, so this must be in
+  # CXXFLAGS as well as CFLAGS.
+  run env "BUILDROOT=$root" "SRCDIR=$downloads" "RESUME_DIR=$resume" "BUILD_STACK_REV=$revision" "CONCURRENCY=-j$JOBS" "CFLAGS=-Wno-incompatible-function-pointer-types -Wno-int-conversion -Wno-cast-function-type-strict" "CXXFLAGS=-Wno-cast-function-type-strict" bash "$tools/x-applearm.resumable.sh"
+  write_file "$root/.built-rev" "$revision"
+  [ "$DRY_RUN" -eq 1 ] || rm -rf "$resume"
+  note "dependency stack built: $root"
+}
+build_dir() { printf '%s/builds/%s\n' "$WORK_DIR" "$(current_commit)"; }
+prepare_build_link() {
+  local target=$1 link="$SOURCE_PATH/build"
+  if [ -L "$link" ]; then
+    if [ "$(readlink "$link")" = "$target" ]; then return; fi
+    case "$(readlink "$link")" in
+      "$WORK_DIR"/builds/*) [ "$DRY_RUN" -eq 1 ] || { rm "$link"; ln -s "$target" "$link"; };;
+      *) die "source build link belongs to another build: $link";;
+    esac
+  elif [ -e "$link" ]; then die "refusing to replace existing source build path: $link"
+  elif [ "$DRY_RUN" -eq 0 ]; then ln -s "$target" "$link"; fi
+}
+prepare_packaging_share_link() {
+  local link="$(dirname "$(build_dir)")/share"
+  if [ -L "$link" ]; then
+    [ "$(readlink "$link")" = "$SOURCE_PATH/share" ] || die "packaging share link belongs to another source tree: $link"
+  elif [ -e "$link" ]; then
+    die "refusing to replace existing packaging share path: $link"
+  elif [ "$DRY_RUN" -eq 0 ]; then
+    ln -s "$SOURCE_PATH/share" "$link"
+  fi
+}
+write_build_metadata() {
+  local directory=$1 artifact=${2:-} tag content
+  tag=$(current_tag)
+  content=$(printf 'ardour_commit=%s\nardour_tag=%s\nbuild_stack_rev=%s\nconfiguration=--arm64 --optimize\nartifact=%s' "$(current_commit)" "${tag:-none}" "$(stack_rev)" "${artifact:-none}")
+  write_file "$directory/metadata" "$content"
+}
+build_ardour() {
+  require_source; ensure_stack
+  local directory gtk
+  directory=$(build_dir); gtk=$(gtk_root)
+  run mkdir -p "$directory"; prepare_build_link "$directory"
+  run_in_dir "$SOURCE_PATH" env "PATH=$gtk/bin:$PATH" "PKG_CONFIG_PATH=$gtk/lib/pkgconfig" "DEPSTACK_ROOT=$(stack_root)" ./waf configure "--out=$directory" --arm64 --optimize "--depstack-root=$(stack_root)"
+  run_in_dir "$SOURCE_PATH" env "PATH=$gtk/bin:$PATH" "PKG_CONFIG_PATH=$gtk/lib/pkgconfig" "DEPSTACK_ROOT=$(stack_root)" ./waf "--out=$directory" -j "$JOBS"
+  write_build_metadata "$directory"; note "Ardour built: $directory"
+}
+build_translations() {
+  local directory=$1 gtk
+  gtk=$(gtk_root)
+  run_in_dir "$SOURCE_PATH" env "PATH=$gtk/bin:$PATH" "PKG_CONFIG_PATH=$gtk/lib/pkgconfig" "DEPSTACK_ROOT=$(stack_root)" ./waf "--out=$directory" i18n_mo
+}
+package_ardour() {
+  require_source; ensure_stack
+  local directory gtk packaging artifacts dmg artifact_dmg
+  directory=$(build_dir); [ -d "$directory" ] || die "Ardour is not built for $(current_commit); run: ardour-ci build"
+  gtk=$(gtk_root); prepare_build_link "$directory"; prepare_packaging_share_link; build_translations "$directory"; packaging="$SOURCE_PATH/tools/osx_packaging"; artifacts="$WORK_DIR/artifacts/$(current_commit)"
+  run mkdir -p "$artifacts"
+  if [ "$DRY_RUN" -eq 1 ]; then note "dry-run: would run $packaging/osx_build --public --stack $gtk"; return; fi
+  (cd "$packaging" && CACHEDIR="$WORK_DIR/video-cache" ./osx_build --public --stack "$gtk")
+  dmg=$(find "$packaging" -maxdepth 1 -type f -name 'Ardour-*.dmg' -print -quit); [ -n "$dmg" ] || die "packaging did not create a DMG"
+  artifact_dmg="$artifacts/$(basename "$dmg")"
+  cp "$dmg" "$artifact_dmg"
+  write_build_metadata "$directory" "$artifact_dmg"; note "package created: $artifact_dmg"
+}
+clean_work() { [ "$WORK_DIR" != "$CI_ROOT" ] || die "refusing to remove repository root"; [ "$DRY_RUN" -eq 1 ] && { note "dry-run: would remove $WORK_DIR"; return; }; rm -rf "$WORK_DIR"; note "removed pipeline work directory: $WORK_DIR"; }
+
+parse_global_options() {
+  REMAINING=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source) SOURCE_OVERRIDE=${2:-}; [ -n "$SOURCE_OVERRIDE" ] || die "--source requires a path"; shift 2;;
+      --work-dir) WORK_DIR=${2:-}; [ -n "$WORK_DIR" ] || die "--work-dir requires a path"; CONFIG_FILE="$WORK_DIR/config"; LOCK_FILE="$WORK_DIR/build-stack.lock"; shift 2;;
+      --jobs) JOBS=${2:-}; [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be a positive integer"; shift 2;;
+      --stack-rev) STACK_REV_OVERRIDE=${2:-}; [ -n "$STACK_REV_OVERRIDE" ] || die "--stack-rev requires a revision"; shift 2;;
+      --dry-run) DRY_RUN=1; shift;;
+      --help|-h) usage; exit 0;;
+      *) REMAINING+=("$1"); shift;;
+    esac
+  done
+}
+parse_global_options "$@"; set -- "${REMAINING[@]}"
+case "${1:-}" in
+  config) case "${2:-}" in set-source) config_set_source "${3:-}";; show) config_show;; *) die "usage: ardour-ci config {set-source PATH|show}";; esac;;
+  source) [ "${2:-}" = status ] || die "usage: ardour-ci source status"; source_status;;
+  doctor) doctor;;
+  deps) case "${2:-}" in sync) deps_sync;; build) deps_build;; *) die "usage: ardour-ci deps {sync|build}";; esac;;
+  build) build_ardour;; package) package_ardour;; all) doctor; deps_build; build_ardour; package_ardour;; clean) clean_work;;
+  ""|help) usage;; *) die "unknown command: $1";;
+esac

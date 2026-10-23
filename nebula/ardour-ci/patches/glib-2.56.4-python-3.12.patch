@@ -1,0 +1,64 @@
+diff --git a/gio/gdbus-2.0/codegen/utils.py b/gio/gdbus-2.0/codegen/utils.py
+index 6f0d832..0d6f2bf 100644
+--- a/gio/gdbus-2.0/codegen/utils.py
++++ b/gio/gdbus-2.0/codegen/utils.py
+@@ -19,6 +19,6 @@
+ #
+ # Author: David Zeuthen <davidz@redhat.com>
+ 
+-import distutils.version
++import re
+ import os
+ import sys
+@@ -135,14 +135,21 @@ def lookup_brief_docs(annotations):
+     else:
+         return s
+ 
++def _version_key(version):
++    # distutils was removed from Python 3.12. GDBus version annotations are
++    # normally numeric, but retain deterministic ordering for textual parts.
++    parts = re.findall(r'\d+|[a-zA-Z]+', version)
++    return tuple((0, int(part)) if part.isdigit() else (1, part.lower())
++                 for part in parts)
++
+ def version_cmp_key(key):
+     # If the 'since' version is 'UNRELEASED', compare higher than anything else
+     # If it is empty put a 0 in its place as this will
+     # allow LooseVersion to work and will always compare lower.
+     if key[0] == 'UNRELEASED':
+         v = '9999'
+     elif key[0]:
+         v = str(key[0])
+     else:
+         v = '0'
+-    return (distutils.version.LooseVersion(v), key[1])
++    return (_version_key(v), key[1])
+diff --git a/py-compile b/py-compile
+--- a/py-compile
++++ b/py-compile
+@@ -119,1 +119,6 @@
+-import sys, os, py_compile, imp
++import sys, os, py_compile
++try:
++    from importlib import util as importlib_util
++except ImportError:
++    import imp
++    importlib_util = None
+@@ -132,2 +137,2 @@
+-    if hasattr(imp, 'get_tag'):
+-        py_compile.compile(filepath, imp.cache_from_source(filepath), path)
++    if importlib_util is not None and hasattr(importlib_util, 'cache_from_source'):
++        py_compile.compile(filepath, importlib_util.cache_from_source(filepath), path)
+@@ -140,1 +145,6 @@
+-import sys, os, py_compile, imp
++import sys, os, py_compile
++try:
++    from importlib import util as importlib_util
++except ImportError:
++    import imp
++    importlib_util = None
+@@ -156,2 +166,2 @@
+-    if hasattr(imp, 'get_tag'):
+-        py_compile.compile(filepath, imp.cache_from_source(filepath, False), path)
++    if importlib_util is not None and hasattr(importlib_util, 'cache_from_source'):
++        py_compile.compile(filepath, importlib_util.cache_from_source(filepath, False), path)
