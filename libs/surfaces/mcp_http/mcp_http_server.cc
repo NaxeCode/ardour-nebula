@@ -3045,6 +3045,11 @@ MCPHttpServer::start ()
 #endif
 
 	_info.port      = _port;
+	/* only local clients: tools/call can edit or replace the session.
+	 * lws binds a numeric iface only to an IPv4 socket.
+	 */
+	_info.iface     = "127.0.0.1";
+	_info.options   = LWS_SERVER_OPTION_DISABLE_IPV6;
 	_info.protocols = _protocols;
 	_info.gid       = -1;
 	_info.uid       = -1;
