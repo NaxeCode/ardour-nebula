@@ -24,6 +24,9 @@ This is an experimental surface intended for early real-world testing and feedba
 5. Use endpoint:
    `http://127.0.0.1:<port>/mcp`
 
+The server listens on `127.0.0.1` only, so only clients on this machine can
+reach it.
+
 The server applies port changes immediately after committing the setting.
 
 ## Transport and Naming
@@ -48,6 +51,12 @@ The server applies port changes immediately after committing the setting.
 - `session/quick_snapshot`
 - `session/store_mixer_scene`
 - `session/recall_mixer_scene`
+- `session/open`
+- `session/new`
+
+`session/open` and `session/new` close this session (saving it first unless
+`save` is false), and this server restarts with the next one: reconnect after
+a few seconds.
 
 ## Transport
 - `transport/get_state`
@@ -77,6 +86,7 @@ The server applies port changes immediately after committing the setting.
 - `track/set_solo`
 - `track/set_rec_enable`
 - `track/set_rec_safe`
+- `tracks/remove`
 
 ## Sends and Routing
 - `track/add_send`
@@ -114,6 +124,17 @@ The server applies port changes immediately after committing the setting.
 - `region/split`
 - `region/set_gain`
 - `region/normalize`
+
+## Audio Files
+- `audio/import`: copy an audio file into the session (converting its sample
+  rate if needed) and place it on a track, or on a new track.
+- `region/replace_audio`: put a new audio file in place of a region, at the
+  same position and layer.
+- `track/replace_audio`: replace all of a track's regions with one audio file,
+  for example a re-rendered stem.
+
+Paths are absolute paths on the machine running Ardour. Each edit is one undo
+step.
 
 ## MIDI Regions and Notes
 - `midi_region/add`
@@ -176,6 +197,10 @@ Use these with your MCP-capable assistant to get started quickly.
 - "Rename marker Frank to Verse Lead-In."
 - "Add arrangement section Solo 2 at bar 40."
 - "Set punch range from bar 34 for 4 bars and hide it."
+
+## Audio File Tasks
+- "Import /path/to/drums.wav onto a new track at bar 1."
+- "Replace the audio on track Bass with /path/to/bass_v2.wav."
 
 ## Region and MIDI Tasks
 - "Create a MIDI region on MCP MIDI Test from bar 3 for 2 bars."

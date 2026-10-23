@@ -3626,6 +3626,168 @@ R"mcp(
         },
         "additionalProperties": true
       }
+    },
+    {
+      "name": "audio_import",
+      "title": "Import Audio",
+      "description": "Import an audio file (copied into the session, sample rate converted if needed) as a region at sample or bar+beat (default: session start). Goes on the audio track trackId, or on a new track named after the file (or name).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "absolute path of the audio file"
+          },
+          "trackId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "description": "region and new track name"
+          },
+          "sample": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bar": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "beat": {
+            "type": "number",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "region_replace_audio",
+      "title": "Replace Region Audio",
+      "description": "Replace an audio region with a new audio file at the same position and layer; the new region is the whole file. If regionId is omitted, uses selected track's top region at playhead.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "regionId": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "absolute path of the audio file"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "track_replace_audio",
+      "title": "Replace Track Audio",
+      "description": "Remove every region on an audio track and put an audio file in their place, at sample or bar+beat (default: where the track's first region started, else session start). One undo step.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "audio track id"
+          },
+          "path": {
+            "type": "string",
+            "description": "absolute path of the audio file"
+          },
+          "sample": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bar": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "beat": {
+            "type": "number",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id",
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "tracks_remove",
+      "title": "Remove Tracks",
+      "description": "Remove tracks or buses by id. The master and monitor buses cannot be removed. Not undoable; save or snapshot first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "session_open",
+      "title": "Open Session",
+      "description": "Close this session and open another: a session folder (with optional snapshotName) or an .ardour file. save (default true) saves this session first; false discards unsaved changes. This server restarts with the new session, so reconnect after a few seconds.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "absolute session folder or .ardour file"
+          },
+          "snapshotName": {
+            "type": "string"
+          },
+          "save": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "session_new",
+      "title": "New Session",
+      "description": "Close this session and create a new one in the folder path (its parent must exist), named name (default: the folder name), at the running engine's sample rate, with a stereo master bus. save (default true) saves this session first. This server restarts with the new session, so reconnect after a few seconds.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "absolute folder of the new session"
+          },
+          "name": {
+            "type": "string"
+          },
+          "save": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
     }
   ]
 }
