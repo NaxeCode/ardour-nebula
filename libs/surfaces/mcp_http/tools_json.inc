@@ -3788,6 +3788,265 @@ R"mcp(
         ],
         "additionalProperties": false
       }
+    },
+    {
+      "name": "engine_get_state",
+      "title": "Audio Engine State",
+      "description": "The audio engine: running or not, the backends, the current backend, its devices (input and output separately where the backend has them, each with whether it's available), the current devices, sample rate and buffer size, and the sample rates and buffer sizes the current devices offer.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "engine_set",
+      "title": "Set Audio Engine",
+      "description": "Set the audio engine as the Audio/MIDI Setup window does: stop it, choose the backend, the device (or inputDevice and outputDevice where the backend has them separately), sampleRate and bufferSize, start it, and keep the choice as the default for the next launch. Leave a field out to keep what is chosen; a new device brings its own default rate, so give the rate with it. Each value must be one the window offers (engine_get_state); the error lists the choices. The open session keeps running; a session at another sample rate is resampled.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "backend": {
+            "type": "string"
+          },
+          "device": {
+            "type": "string"
+          },
+          "inputDevice": {
+            "type": "string"
+          },
+          "outputDevice": {
+            "type": "string"
+          },
+          "sampleRate": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "bufferSize": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ui_dialogs_list",
+      "title": "Open Dialogs",
+      "description": "The dialogs open in Ardour now, topmost last: index, title, whether modal, their text and their buttons.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ui_dialog_respond",
+      "title": "Answer a Dialog",
+      "description": "Press a button in an open dialog, by its label as ui_dialogs_list shows it. Name the dialog by index or title; it may be left out when only one is open.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string"
+          },
+          "button": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "button"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ui_run_action",
+      "title": "Run a GUI Action",
+      "description": "Run one of Ardour's menu or keyboard actions by its path, Group/name, as in Window > Keyboard Shortcuts, e.g. Editor/zoom-to-session, Editor/fit-selection, Common/toggle-editor-and-mixer.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "editor_get_view",
+      "title": "Editor View",
+      "description": "What the editor shows: the leftmost sample, the samples on the page and per pixel, the vertical scroll and visible height, and every track in editor order with its id, name, whether it is shown (not hidden), its height and y position in pixels, and whether it is on screen now.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "editor_set_track_height",
+      "title": "Set Track Height",
+      "description": "Set a track's height in the editor, in pixels or as a preset: largest, larger, large, normal, small. Name the track by trackId or trackName.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "trackId": {
+            "type": "string"
+          },
+          "trackName": {
+            "type": "string"
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "preset": {
+            "type": "string",
+            "enum": [
+              "largest",
+              "larger",
+              "large",
+              "normal",
+              "small"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "editor_set_track_visible",
+      "title": "Show or Hide a Track",
+      "description": "Show or hide a track in the editor (hidden tracks still play). Name the track by trackId or trackName.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "trackId": {
+            "type": "string"
+          },
+          "trackName": {
+            "type": "string"
+          },
+          "visible": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "visible"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "editor_scroll_to_track",
+      "title": "Scroll to Track",
+      "description": "Scroll the editor so a track is visible, at the top of the view unless atTop is false. Name the track by trackId or trackName.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "trackId": {
+            "type": "string"
+          },
+          "trackName": {
+            "type": "string"
+          },
+          "atTop": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "editor_scroll_to_time",
+      "title": "Scroll to Time",
+      "description": "Scroll the editor so a moment is at its left edge: a sample, or a bar and beat.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sample": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bar": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "beat": {
+            "type": "number",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "editor_zoom_to_session",
+      "title": "Zoom to Session",
+      "description": "Zoom the editor to show the whole session.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "track_set_color",
+      "title": "Set Track Colour",
+      "description": "Set a track's or bus's colour, as #rrggbb.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "color": {
+            "type": "string",
+            "pattern": "^#?[0-9a-fA-F]{6}$"
+          }
+        },
+        "required": [
+          "id",
+          "color"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "tracks_group",
+      "title": "Group Tracks",
+      "description": "Put tracks in a route group, made if it doesn't exist (e.g. one group per instrument family). With color (#rrggbb), the group and its tracks take that colour.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "color": {
+            "type": "string",
+            "pattern": "^#?[0-9a-fA-F]{6}$"
+          }
+        },
+        "required": [
+          "name",
+          "ids"
+        ],
+        "additionalProperties": false
+      }
     }
   ]
 }

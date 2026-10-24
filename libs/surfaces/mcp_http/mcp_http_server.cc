@@ -53,6 +53,7 @@
 #include "pbd/xml++.h"
 
 #include "ardour/amp.h"
+#include "ardour/audio_backend.h"
 #include "ardour/audio_track.h"
 #include "ardour/audioengine.h"
 #include "ardour/audioregion.h"
@@ -75,6 +76,7 @@
 #include "ardour/region.h"
 #include "ardour/region_factory.h"
 #include "ardour/route.h"
+#include "ardour/route_group.h"
 #include "ardour/selection.h"
 #include "ardour/session.h"
 #include "ardour/session_event.h"
@@ -245,7 +247,10 @@ canonical_tool_name (std::string tool_name)
 		"plugin",
 		"midi_region",
 		"midi_note",
-		"audio"
+		"audio",
+		"engine",
+		"editor",
+		"ui"
 	};
 
 	for (size_t i = 0; i < (sizeof (known_groups) / sizeof (known_groups[0])); ++i) {
@@ -8573,6 +8578,241 @@ handle_session_new_tool (ARDOUR::Session& session, const pt::ptree& root, const 
 	    std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"Creating session; this server restarts with it, so reconnect in a few seconds\"}],\"structuredContent\":") + structured.str () + "}");
 }
 
+
+/* ---- the engine, dialogs and the editor's view ---------------------------
+ *
+ * engine/get_state reads the backend directly. engine/set, ui/... and
+ * editor/... are done by the GUI (ControlProtocol::GuiRequest), on its
+ * thread, so the Audio/MIDI Setup window, open dialogs and the editor stay
+ * the GUI's own.
+ */
+
+static std::string
+gui_request (PBD::EventLoop* event_loop, const std::string& request, const pt::ptree& arguments, const std::string& id)
+{
+	std::ostringstream args;
+	pt::write_json (args, arguments, false);
+	std::string const args_json = args.str ();
+
+	std::optional<std::string> answer;
+	run_in_event_loop (event_loop, [&] () { answer = ARDOUR::ControlProtocol::GuiRequest (request, args_json); });
+
+	if (!answer) {
+		return jsonrpc_error (id, -32000, "Ardour's GUI is not running");
+	}
+
+	pt::ptree          parsed;
+	std::istringstream in (*answer);
+	try {
+		pt::read_json (in, parsed);
+	} catch (...) {
+		return jsonrpc_error (id, -32000, "Unreadable answer from the GUI");
+	}
+	if (parsed.count ("error")) {
+		return jsonrpc_error (id, -32602, parsed.get<std::string> ("error", ""));
+	}
+	return jsonrpc_result (id, std::string ("{\"content\":[{\"type\":\"text\",\"text\":") + "\"" + json_escape (*answer) + "\"" + "}],\"structuredContent\":" + *answer + "}");
+}
+
+static std::string
+json_number_array (const std::vector<float>& values)
+{
+	std::ostringstream out;
+	out << "[";
+	for (size_t i = 0; i < values.size (); ++i) {
+		out << (i ? "," : "") << values[i];
+	}
+	out << "]";
+	return out.str ();
+}
+
+static std::string
+json_number_array (const std::vector<uint32_t>& values)
+{
+	std::ostringstream out;
+	out << "[";
+	for (size_t i = 0; i < values.size (); ++i) {
+		out << (i ? "," : "") << values[i];
+	}
+	out << "]";
+	return out.str ();
+}
+
+static std::string
+devices_json (const std::vector<ARDOUR::AudioBackend::DeviceStatus>& devices)
+{
+	std::ostringstream out;
+	out << "[";
+	for (size_t i = 0; i < devices.size (); ++i) {
+		out << (i ? "," : "") << "{\"name\":\"" << json_escape (devices[i].name) << "\",\"available\":" << (devices[i].available ? "true" : "false") << "}";
+	}
+	out << "]";
+	return out.str ();
+}
+
+static std::string
+handle_engine_get_state_tool (const std::string& id)
+{
+	ARDOUR::AudioEngine*                         engine  = ARDOUR::AudioEngine::instance ();
+	const std::shared_ptr<ARDOUR::AudioBackend> backend = engine->current_backend ();
+
+	std::vector<std::string>                               backends;
+	std::vector<const ARDOUR::AudioBackendInfo*> const available = engine->available_backends ();
+	for (std::vector<const ARDOUR::AudioBackendInfo*>::const_iterator b = available.begin (); b != available.end (); ++b) {
+		backends.push_back ((*b)->name);
+	}
+
+	std::ostringstream structured;
+	structured << "{\"running\":" << (engine->running () ? "true" : "false") << ",\"backends\":" << json_string_array (backends);
+	if (!backend) {
+		structured << ",\"backend\":null}";
+	} else {
+		structured << ",\"backend\":\"" << json_escape (backend->name ()) << "\""
+		           << ",\"sampleRate\":" << backend->sample_rate () << ",\"bufferSize\":" << backend->buffer_size ();
+		if (backend->use_separate_input_and_output_devices ()) {
+			const std::string in  = backend->input_device_name ();
+			const std::string out = backend->output_device_name ();
+			structured << ",\"separateInputOutput\":true"
+			           << ",\"inputDevice\":\"" << json_escape (in) << "\",\"outputDevice\":\"" << json_escape (out) << "\""
+			           << ",\"inputDevices\":" << devices_json (backend->enumerate_input_devices ())
+			           << ",\"outputDevices\":" << devices_json (backend->enumerate_output_devices ())
+			           << ",\"sampleRates\":" << json_number_array (backend->available_sample_rates2 (in, out))
+			           << ",\"bufferSizes\":" << json_number_array (backend->available_buffer_sizes2 (in, out));
+		} else {
+			const std::string dev = backend->device_name ();
+			structured << ",\"separateInputOutput\":false,\"device\":\"" << json_escape (dev) << "\""
+			           << ",\"devices\":" << devices_json (backend->enumerate_devices ())
+			           << ",\"sampleRates\":" << json_number_array (backend->available_sample_rates (dev))
+			           << ",\"bufferSizes\":" << json_number_array (backend->available_buffer_sizes (dev));
+		}
+		structured << "}";
+	}
+
+	return jsonrpc_result (id, std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"Audio engine state\"}],\"structuredContent\":") + structured.str () + "}");
+}
+
+static bool
+parse_rgb (std::string hex, uint32_t& rgba)
+{
+	if (!hex.empty () && hex[0] == '#') {
+		hex.erase (0, 1);
+	}
+	if (hex.size () != 6 || hex.find_first_not_of ("0123456789abcdefABCDEF") != std::string::npos) {
+		return false;
+	}
+	rgba = (static_cast<uint32_t> (std::stoul (hex, 0, 16)) << 8) | 0xff;
+	return true;
+}
+
+static std::string
+handle_track_set_color_tool (ARDOUR::Session& session, PBD::EventLoop* event_loop, const pt::ptree& root, const std::string& id)
+{
+	const std::shared_ptr<ARDOUR::Route> route = route_by_mcp_id (session, root.get<std::string> ("params.arguments.id", ""));
+	if (!route) {
+		return jsonrpc_error (id, -32602, "Route not found");
+	}
+	uint32_t rgba = 0;
+	if (!parse_rgb (root.get<std::string> ("params.arguments.color", ""), rgba)) {
+		return jsonrpc_error (id, -32602, "color must be #rrggbb");
+	}
+	run_in_event_loop (event_loop, [&] () { route->presentation_info ().set_color (rgba); });
+	return jsonrpc_result (id, std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"Track colour set\"}],\"structuredContent\":{\"id\":\"") + json_escape (route->id ().to_s ()) + "\",\"name\":\"" + json_escape (route->name ()) + "\"}}");
+}
+
+static std::string
+handle_tracks_group_tool (ARDOUR::Session& session, PBD::EventLoop* event_loop, const pt::ptree& root, const std::string& id)
+{
+	const std::string name = root.get<std::string> ("params.arguments.name", "");
+	if (name.empty ()) {
+		return jsonrpc_error (id, -32602, "Missing name");
+	}
+	std::vector<std::shared_ptr<ARDOUR::Route> > routes;
+	const boost::optional<const pt::ptree&>     ids = root.get_child_optional ("params.arguments.ids");
+	if (ids) {
+		for (pt::ptree::const_iterator i = ids->begin (); i != ids->end (); ++i) {
+			const std::shared_ptr<ARDOUR::Route> route = route_by_mcp_id (session, i->second.get_value<std::string> ());
+			if (!route) {
+				return jsonrpc_error (id, -32602, "Route not found: " + i->second.get_value<std::string> ());
+			}
+			routes.push_back (route);
+		}
+	}
+	uint32_t   rgba      = 0;
+	const bool has_color = root.count ("params") && !root.get<std::string> ("params.arguments.color", "").empty ();
+	if (has_color && !parse_rgb (root.get<std::string> ("params.arguments.color", ""), rgba)) {
+		return jsonrpc_error (id, -32602, "color must be #rrggbb");
+	}
+
+	bool created = false;
+	run_in_event_loop (event_loop, [&] () {
+		std::shared_ptr<ARDOUR::RouteGroup> group = session.route_group_by_name (name);
+		if (!group) {
+			group   = session.new_route_group (name);
+			created = true;
+		}
+		for (std::vector<std::shared_ptr<ARDOUR::Route> >::iterator r = routes.begin (); r != routes.end (); ++r) {
+			group->add (*r);
+		}
+		if (has_color) {
+			group->set_rgba (rgba);
+			group->set_color (true);
+			for (std::vector<std::shared_ptr<ARDOUR::Route> >::iterator r = routes.begin (); r != routes.end (); ++r) {
+				(*r)->presentation_info ().set_color (rgba);
+			}
+		}
+	});
+
+	std::ostringstream structured;
+	structured << "{\"group\":\"" << json_escape (name) << "\",\"created\":" << (created ? "true" : "false") << ",\"added\":" << routes.size () << "}";
+	return jsonrpc_result (id, std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"Tracks grouped\"}],\"structuredContent\":") + structured.str () + "}");
+}
+
+static bool
+dispatch_gui_tool_call (ARDOUR::Session& session, PBD::EventLoop* event_loop, const std::string& tool_name, const pt::ptree& root, const std::string& id, std::string& response)
+{
+	if (tool_name == "engine/get_state") {
+		response = handle_engine_get_state_tool (id);
+		return true;
+	}
+	if (tool_name == "track/set_color") {
+		response = handle_track_set_color_tool (session, event_loop, root, id);
+		return true;
+	}
+	if (tool_name == "tracks/group") {
+		response = handle_tracks_group_tool (session, event_loop, root, id);
+		return true;
+	}
+
+	static const char* gui_tools[] = {
+		"engine/set", "ui/dialogs_list", "ui/dialog_respond", "ui/run_action", "editor/get_view",
+		"editor/set_track_height", "editor/set_track_visible", "editor/scroll_to_track",
+		"editor/scroll_to_time", "editor/zoom_to_session"
+	};
+	for (size_t i = 0; i < sizeof (gui_tools) / sizeof (gui_tools[0]); ++i) {
+		if (tool_name != gui_tools[i]) {
+			continue;
+		}
+		pt::ptree arguments;
+		const boost::optional<const pt::ptree&> given = root.get_child_optional ("params.arguments");
+		if (given) {
+			arguments = *given;
+		}
+		if (tool_name == "editor/scroll_to_time" && arguments.count ("bar")) {
+			samplepos_t sample = 0;
+			std::string error;
+			if (!parse_bbt_target_sample (arguments.get<int> ("bar", 1), arguments.get<double> ("beat", 1.0), sample, error)) {
+				response = jsonrpc_error (id, -32602, error);
+				return true;
+			}
+			arguments.put ("sample", sample);
+		}
+		response = gui_request (event_loop, tool_name, arguments, id);
+		return true;
+	}
+
+	return false;
+}
+
 static bool
 dispatch_media_tool_call (ARDOUR::Session& session, PBD::EventLoop* event_loop, const std::string& tool_name, const pt::ptree& root, const std::string& id, std::string& response)
 {
@@ -8680,6 +8920,11 @@ MCPHttpServer::dispatch_jsonrpc (const std::string& payload) const
 			return jsonrpc_result (
 			    id,
 			    std::string ("{\"content\":[{\"type\":\"text\",\"text\":\"") + json_escape (text) + "\"}]}");
+		}
+
+		std::string gui_tool_response;
+		if (dispatch_gui_tool_call (_session, _event_loop, tool_name, root, id, gui_tool_response)) {
+			return gui_tool_response;
 		}
 
 		std::string media_tool_response;

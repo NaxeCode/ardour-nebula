@@ -87,6 +87,10 @@ a few seconds.
 - `track/set_rec_enable`
 - `track/set_rec_safe`
 - `tracks/remove`
+- `track/set_color`: a track's or bus's colour, as `#rrggbb`.
+- `tracks/group`: put tracks in a route group, made if it doesn't exist, with
+  an optional colour for the group and its tracks (one group per instrument
+  family, as orchestral templates do).
 
 ## Sends and Routing
 - `track/add_send`
@@ -135,6 +139,32 @@ a few seconds.
 
 Paths are absolute paths on the machine running Ardour. Each edit is one undo
 step.
+
+## Audio Engine, Dialogs and the Editor View
+
+So a client never needs to drive Ardour's windows by hand. `engine/get_state`
+reads the backend directly; the rest are done by the GUI, on its thread
+(`ControlProtocol::GuiRequest`), and fail cleanly when there is no GUI.
+
+- `engine/get_state`: running or not, the backends, the current backend and
+  its devices (input and output separately where the backend has them), the
+  current devices, sample rate and buffer size, and the rates and buffer sizes
+  the current devices offer.
+- `engine/set`: what the Audio/MIDI Setup window does: stop the engine, choose
+  the backend, devices, sample rate and buffer size, start it, and keep the
+  choice as the default for the next launch. Every value must be one the
+  window offers; the error lists the choices. It opens no dialog.
+- `ui/dialogs_list`: the open dialogs, topmost last, with their title, text and
+  buttons.
+- `ui/dialog_respond`: press a dialog's button by its label.
+- `ui/run_action`: run a menu or keyboard action by `Group/name`, e.g.
+  `Editor/zoom-to-session`.
+- `editor/get_view`: the visible time range and zoom, and every track in
+  editor order with whether it is shown, its height and whether it is on
+  screen.
+- `editor/set_track_height`, `editor/set_track_visible`,
+  `editor/scroll_to_track`, `editor/scroll_to_time` (a sample, or a bar and
+  beat), `editor/zoom_to_session`.
 
 ## MIDI Regions and Notes
 - `midi_region/add`

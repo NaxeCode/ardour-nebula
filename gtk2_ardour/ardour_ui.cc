@@ -452,6 +452,8 @@ ARDOUR_UI::ARDOUR_UI (int *argcp, char **argvp[], const char* localedir)
 
 	ControlProtocol::OpenSession.connect (forever_connections, MISSING_INVALIDATOR, std::bind (&ARDOUR_UI::control_protocol_open_session, this, _1, _2, _3), gui_context ());
 	ControlProtocol::NewSession.connect (forever_connections, MISSING_INVALIDATOR, std::bind (&ARDOUR_UI::control_protocol_new_session, this, _1, _2, _3), gui_context ());
+	/* answered at once: the surface emits it on the GUI thread and waits */
+	ControlProtocol::GuiRequest.connect_same_thread (forever_connections, std::bind (&ARDOUR_UI::control_protocol_gui_request, this, _1, _2));
 
 	/* handle requests to deal with missing files */
 

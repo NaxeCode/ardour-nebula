@@ -2550,6 +2550,94 @@ EngineControl::push_state_to_backend (bool start)
 	return 0;
 }
 
+static std::vector<std::string>
+combo_strings (Gtk::ComboBoxText& combo)
+{
+	std::vector<std::string>       strings;
+	Glib::RefPtr<Gtk::TreeModel> model = combo.get_model ();
+	if (!model) {
+		return strings;
+	}
+	for (Gtk::TreeModel::iterator i = model->children ().begin (); i != model->children ().end (); ++i) {
+		Glib::ustring text;
+		i->get_value (0, text);
+		strings.push_back (text);
+	}
+	return strings;
+}
+
+static bool
+choose_in_combo (Gtk::ComboBoxText& combo, std::string const& text, std::string const& what, std::string& error)
+{
+	std::vector<std::string> offered = combo_strings (combo);
+	if (std::find (offered.begin (), offered.end (), text) == offered.end ()) {
+		std::string list;
+		for (std::vector<std::string>::const_iterator i = offered.begin (); i != offered.end (); ++i) {
+			list += (list.empty () ? "" : ", ") + *i;
+		}
+		error = string_compose ("%1 \"%2\" is not offered; the choices are: %3", what, text, list);
+		return false;
+	}
+	if (combo.get_active_text () != text) {
+		combo.set_active_text (text);
+	}
+	return true;
+}
+
+std::string
+EngineControl::configure_for_control_protocol (std::string const& backend,
+                                               std::string const& device,
+                                               std::string const& input_device,
+                                               std::string const& output_device,
+                                               float              sample_rate,
+                                               uint32_t           buffer_size)
+{
+	std::string error;
+
+	/* devices can only be changed while the engine is stopped, as in the
+	 * window itself
+	 */
+	if (ARDOUR::AudioEngine::instance ()->running ()) {
+		ARDOUR::AudioEngine::instance ()->stop ();
+	}
+
+	/* each choice runs the window's own handlers, which refill the
+	 * choices after it (a new device offers its own rates)
+	 */
+	if (!backend.empty () && !choose_in_combo (backend_combo, backend, "Backend", error)) {
+		return error;
+	}
+	if (!device.empty () && !choose_in_combo (device_combo, device, "Device", error)) {
+		return error;
+	}
+	if (!input_device.empty () && !choose_in_combo (input_device_combo, input_device, "Input device", error)) {
+		return error;
+	}
+	if (!output_device.empty () && !choose_in_combo (output_device_combo, output_device, "Output device", error)) {
+		return error;
+	}
+	if (sample_rate > 0 && !choose_in_combo (sample_rate_combo, rate_as_string (sample_rate), "Sample rate", error)) {
+		return error;
+	}
+	if (buffer_size > 0 && !choose_in_combo (buffer_size_combo, bufsize_as_string (buffer_size), "Buffer size", error)) {
+		return error;
+	}
+
+	const int rv = push_state_to_backend (true);
+	if (rv < 0) {
+		return ARDOUR::AudioEngine::instance ()->get_last_backend_error ();
+	}
+	if (rv > 0) {
+		return "Could not configure the audio engine with these settings";
+	}
+
+	/* the default for the next launch, as when the window is used */
+	ARDOUR::Config->add_extra_xml (get_state ());
+	ARDOUR::Config->save_state ();
+
+	return std::string ();
+}
+
 void
 EngineControl::post_push ()
 {

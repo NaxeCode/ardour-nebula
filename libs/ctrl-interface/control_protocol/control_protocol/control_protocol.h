@@ -92,6 +92,14 @@ public:
 	static PBD::Signal<void(std::string, std::string, bool)> OpenSession;
 	static PBD::Signal<void(std::string, std::string, bool)> NewSession;
 
+	/* ask the GUI to do something only it can (the audio engine's dialog,
+	 * open dialogs, the editor's view): a request name and its arguments
+	 * as JSON in, a JSON object out ({"error": "..."} on failure). Emit it
+	 * on the GUI thread; the GUI answers synchronously. No answer means
+	 * there is no GUI.
+	 */
+	static PBD::Signal<std::string(std::string, std::string)> GuiRequest;
+
 	void add_stripable_to_selection (std::shared_ptr<ARDOUR::Stripable>);
 	void set_stripable_selection (std::shared_ptr<ARDOUR::Stripable>);
 	void toggle_stripable_selection (std::shared_ptr<ARDOUR::Stripable>);

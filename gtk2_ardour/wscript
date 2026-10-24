@@ -38,6 +38,7 @@ gtk2_ardour_sources = [
         'ardour_ui_mixer.cc',
         'ardour_ui_options.cc',
         'ardour_ui_session.cc',
+        'ardour_ui_control_protocol.cc',
         'ardour_ui_startup.cc',
         'ardour_ui_video.cc',
         'ardour_window.cc',

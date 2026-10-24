@@ -58,6 +58,19 @@ public:
 
 	void set_desired_sample_rate (uint32_t);
 
+	/* Set the engine for a control surface, as a person would in this
+	 * window: stop it, choose the backend, devices, rate and buffer size
+	 * (empty or 0 keeps what is chosen), start it, and keep the choice as
+	 * the default. Each value must be one the window offers. Returns an
+	 * empty string on success, else why not. Opens no dialog.
+	 */
+	std::string configure_for_control_protocol (std::string const& backend,
+	                                            std::string const& device,
+	                                            std::string const& input_device,
+	                                            std::string const& output_device,
+	                                            float              sample_rate,
+	                                            uint32_t           buffer_size);
+
 private:
 	Gtk::Notebook notebook;
 
