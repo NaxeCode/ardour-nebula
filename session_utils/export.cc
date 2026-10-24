@@ -37,6 +37,10 @@
 #include "ardour/export_channel_configuration.h"
 #include "ardour/export_format_specification.h"
 #include "ardour/export_filename.h"
+#include "ardour/audio_track.h"
+#include "ardour/io.h"
+#include "ardour/location.h"
+#include "ardour/playlist.h"
 #include "ardour/route.h"
 #include "ardour/session_metadata.h"
 #include "ardour/broadcast_info.h"
@@ -130,25 +134,89 @@ static int export_session (Session *session,
 
 	std::shared_ptr<ExportFormatSpecification> fmp = session->get_export_handler()->add_format(*tree.root());
 
-	/* set up range */
+	/* set up range: the session range, or else from the start of the
+	 * first region to the end of the last one.
+	 */
 	samplepos_t start, end;
-	start = session->current_start_sample();
-	end   = session->current_end_sample();
+	if (session->locations()->session_range_location ()) {
+		start = session->current_start_sample();
+		end   = session->current_end_sample();
+	} else {
+		start = end = 0;
+		bool first = true;
+		std::shared_ptr<RouteList const> routes = session->get_routes ();
+		for (auto const& r : *routes) {
+			std::shared_ptr<Track> t = std::dynamic_pointer_cast<Track> (r);
+			if (!t || !t->playlist () || t->playlist ()->empty ()) {
+				continue;
+			}
+			std::pair<timepos_t, timepos_t> ext = t->playlist ()->get_extent ();
+			if (first || ext.first.samples () < start) {
+				start = ext.first.samples ();
+			}
+			if (first || ext.second.samples () > end) {
+				end = ext.second.samples ();
+			}
+			first = false;
+		}
+	}
+	if (end <= start) {
+		cerr << "Error: the session is empty (no session range and no regions)\n";
+		return -1;
+	}
 	tsp->set_range (start, end);
 	tsp->set_range_id ("session");
 
-	/* add master outs as default */
-	IO* master_out = session->master_out()->output().get();
-	if (!master_out) {
-		PBD::warning << _("Export Util: No Master Out Ports to Connect for Audio Export") << endmsg;
-		return -1;
-	}
+	if (session->master_out ()) {
+		/* add master outs as default */
+		IO* master_out = session->master_out()->output().get();
 
-	for (uint32_t n = 0; n < master_out->n_ports().n_audio(); ++n) {
-		PortExportChannel * channel = new PortExportChannel ();
-		channel->add_port (master_out->audio (n));
-		ExportChannelPtr chan_ptr (channel);
-		ccp->register_channel (chan_ptr);
+		for (uint32_t n = 0; n < master_out->n_ports().n_audio(); ++n) {
+			PortExportChannel * channel = new PortExportChannel ();
+			channel->add_port (master_out->audio (n));
+			ExportChannelPtr chan_ptr (channel);
+			ccp->register_channel (chan_ptr);
+		}
+	} else {
+		/* No master bus: mix what reaches the outputs, the outputs of
+		 * every route that feeds no other route.
+		 */
+		std::shared_ptr<RouteList const> routes = session->get_routes ();
+		RouteList                        outs;
+		uint32_t                         n_chan = 0;
+		for (auto const& r : *routes) {
+			if (r->is_auditioner () || r->is_monitor () || r->output ()->n_ports ().n_audio () == 0) {
+				continue;
+			}
+			bool feeds_other = false;
+			for (auto const& o : *routes) {
+				if (o != r && r->feeds (o)) {
+					feeds_other = true;
+					break;
+				}
+			}
+			if (!feeds_other) {
+				outs.push_back (r);
+				n_chan = std::max (n_chan, r->output ()->n_ports ().n_audio ());
+			}
+		}
+
+		if (outs.empty ()) {
+			cerr << "Error: no master bus, and no route with audio outputs\n";
+			return -1;
+		}
+
+		/* a route with fewer outputs (mono) repeats them across channels */
+		for (uint32_t n = 0; n < n_chan; ++n) {
+			PortExportChannel * channel = new PortExportChannel ();
+			for (auto const& r : outs) {
+				IO* io = r->output ().get ();
+				channel->add_port (io->audio (n % io->n_ports ().n_audio ()));
+			}
+			ExportChannelPtr chan_ptr (channel);
+			ccp->register_channel (chan_ptr);
+		}
+		cout << "* No master bus: mixing the outputs of " << outs.size () << " routes\n";
 	}
 
 	/* output filename */
@@ -258,6 +326,7 @@ int main (int argc, char* argv[])
 		{ "output",     1, 0, 'o' },
 		{ "samplerate", 1, 0, 's' },
 		{ "version",    0, 0, 'V' },
+		{ 0, 0, 0, 0 }
 	};
 
 	int c = 0;
@@ -342,10 +411,10 @@ int main (int argc, char* argv[])
 		settings._samplerate = s->nominal_sample_rate ();
 	}
 
-	export_session (s, outfile, settings);
+	int rv = export_session (s, outfile, settings);
 
 	SessionUtils::unload_session(s);
 	SessionUtils::cleanup();
 
-	return 0;
+	return rv == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
