@@ -224,6 +224,12 @@ audio will be resampled, which reduces quality.\n"), desired, PROGRAM_NAME, actu
 void
 ARDOUR_UI::sr_mismatch_message (samplecnt_t desired, samplecnt_t actual)
 {
+	if (_quiet_sr_mismatch) {
+		/* a control surface set the engine, and was told */
+		_quiet_sr_mismatch = false;
+		PBD::warning << string_compose (_("This session was created with a sample rate of %1 Hz, but %2 is running at %3 Hz; audio is resampled."), desired, PROGRAM_NAME, actual) << endmsg;
+		return;
+	}
 	ArdourMessageDialog msg (string_compose (_("\
 This session was created with a sample rate of %1 Hz, but \
 %2 is currently running at %3 Hz.\n\

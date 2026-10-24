@@ -35,6 +35,8 @@
 #include <ytkmm/messagedialog.h>
 #include <ytkmm/window.h>
 
+#include <glibmm/main.h>
+
 #include "pbd/id.h"
 
 #include "ardour/audioengine.h"
@@ -209,6 +211,9 @@ ARDOUR_UI::control_protocol_gui_request (std::string request, std::string argume
 		if (!ec) {
 			return error_json ("the Audio/MIDI Setup window is not available");
 		}
+		/* the caller hears about a sample rate mismatch in the answer */
+		_quiet_sr_mismatch = true;
+		Glib::signal_timeout ().connect_once ([this] () { _quiet_sr_mismatch = false; }, 3000);
 		std::string const error = ec->configure_for_control_protocol (
 		    args.get<std::string> ("backend", ""), args.get<std::string> ("device", ""),
 		    args.get<std::string> ("inputDevice", ""), args.get<std::string> ("outputDevice", ""),
@@ -216,7 +221,15 @@ ARDOUR_UI::control_protocol_gui_request (std::string request, std::string argume
 		if (!error.empty ()) {
 			return error_json (error);
 		}
-		return "{\"running\":" + std::string (AudioEngine::instance ()->running () ? "true" : "false") + "}";
+		std::ostringstream out;
+		out << "{\"running\":" << (AudioEngine::instance ()->running () ? "true" : "false")
+		    << ",\"sampleRate\":" << AudioEngine::instance ()->sample_rate ();
+		if (_session) {
+			out << ",\"sessionSampleRate\":" << _session->nominal_sample_rate ()
+			    << ",\"resampled\":" << (_session->nominal_sample_rate () != AudioEngine::instance ()->sample_rate () ? "true" : "false");
+		}
+		out << "}";
+		return out.str ();
 	}
 
 	if (request == "ui/dialogs_list") {

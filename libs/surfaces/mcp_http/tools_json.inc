@@ -3802,7 +3802,7 @@ R"mcp(
     {
       "name": "engine_set",
       "title": "Set Audio Engine",
-      "description": "Set the audio engine as the Audio/MIDI Setup window does: stop it, choose the backend, the device (or inputDevice and outputDevice where the backend has them separately), sampleRate and bufferSize, start it, and keep the choice as the default for the next launch. Leave a field out to keep what is chosen; a new device brings its own default rate, so give the rate with it. Each value must be one the window offers (engine_get_state); the error lists the choices. The open session keeps running; a session at another sample rate is resampled.",
+      "description": "Set the audio engine as the Audio/MIDI Setup window does: stop it, choose the backend, the device (or inputDevice and outputDevice where the backend has them separately), sampleRate and bufferSize, start it, and keep the choice as the default for the next launch. Leave a field out to keep what is chosen; a new device brings its own default rate, so give the rate with it. Each value must be one the device offers (engine_get_state); a refused request leaves the engine as it was, and the error lists the choices. If the new settings don't start, the old ones are put back. The answer has the engine's sampleRate and, with a session open, its sessionSampleRate and resampled (true when they differ; Ardour then resamples, and says so in its log instead of a dialog).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3968,7 +3968,7 @@ R"mcp(
     {
       "name": "editor_scroll_to_time",
       "title": "Scroll to Time",
-      "description": "Scroll the editor so a moment is at its left edge: a sample, or a bar and beat.",
+      "description": "Scroll the editor so a moment is at its left edge: a sample, or a bar and beat. The editor applies it on its next redraw, so editor_get_view a moment later shows it.",
       "inputSchema": {
         "type": "object",
         "properties": {

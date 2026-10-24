@@ -2593,50 +2593,100 @@ EngineControl::configure_for_control_protocol (std::string const& backend,
                                                float              sample_rate,
                                                uint32_t           buffer_size)
 {
-	std::string error;
+	std::string                           error;
+	ARDOUR::AudioEngine*                  engine  = ARDOUR::AudioEngine::instance ();
+	std::shared_ptr<ARDOUR::AudioBackend> current = engine->current_backend ();
+
+	/* Check what can be checked before touching the engine, so a refused
+	 * request leaves it as it was. A new backend can only be asked about
+	 * its devices once it is chosen.
+	 */
+	if (current && (backend.empty () || backend == current->name ())) {
+		const bool  separate = current->use_separate_input_and_output_devices ();
+		std::string in       = separate ? (input_device.empty () ? current->input_device_name () : input_device) : (device.empty () ? current->device_name () : device);
+		std::string out      = separate ? (output_device.empty () ? current->output_device_name () : output_device) : in;
+
+		std::vector<ARDOUR::AudioBackend::DeviceStatus> ins  = separate ? current->enumerate_input_devices () : current->enumerate_devices ();
+		std::vector<ARDOUR::AudioBackend::DeviceStatus> outs = separate ? current->enumerate_output_devices () : ins;
+		struct {
+			bool operator() (std::vector<ARDOUR::AudioBackend::DeviceStatus> const& devices, std::string const& name) const
+			{
+				for (std::vector<ARDOUR::AudioBackend::DeviceStatus>::const_iterator d = devices.begin (); d != devices.end (); ++d) {
+					if (d->name == name && d->available) {
+						return true;
+					}
+				}
+				return false;
+			}
+		} offered;
+		if (!offered (ins, in) || !offered (outs, out)) {
+			std::string                                             list;
+			std::vector<ARDOUR::AudioBackend::DeviceStatus> const& devices = offered (ins, in) ? outs : ins;
+			for (std::vector<ARDOUR::AudioBackend::DeviceStatus>::const_iterator d = devices.begin (); d != devices.end (); ++d) {
+				if (d->available) {
+					list += (list.empty () ? "" : ", ") + d->name;
+				}
+			}
+			return string_compose ("Device \"%1\" is not available; the choices are: %2", offered (ins, in) ? out : in, list);
+		}
+		if (sample_rate > 0) {
+			std::vector<float> const rates = separate ? current->available_sample_rates2 (in, out) : current->available_sample_rates (in);
+			if (std::find (rates.begin (), rates.end (), sample_rate) == rates.end ()) {
+				std::string list;
+				for (std::vector<float>::const_iterator r = rates.begin (); r != rates.end (); ++r) {
+					list += (list.empty () ? "" : ", ") + rate_as_string (*r);
+				}
+				return string_compose ("Sample rate %1 is not offered; the choices are: %2", rate_as_string (sample_rate), list);
+			}
+		}
+		if (buffer_size > 0) {
+			std::vector<uint32_t> const sizes = separate ? current->available_buffer_sizes2 (in, out) : current->available_buffer_sizes (in);
+			if (std::find (sizes.begin (), sizes.end (), buffer_size) == sizes.end ()) {
+				std::string list;
+				for (std::vector<uint32_t>::const_iterator z = sizes.begin (); z != sizes.end (); ++z) {
+					list += (list.empty () ? "" : ", ") + bufsize_as_string (*z);
+				}
+				return string_compose ("Buffer size %1 is not offered; the choices are: %2", buffer_size, list);
+			}
+		}
+	}
+
+	/* what to go back to if the new settings don't start */
+	State const before = save_state ();
 
 	/* devices can only be changed while the engine is stopped, as in the
 	 * window itself
 	 */
-	if (ARDOUR::AudioEngine::instance ()->running ()) {
-		ARDOUR::AudioEngine::instance ()->stop ();
+	if (engine->running ()) {
+		engine->stop ();
 	}
 
 	/* each choice runs the window's own handlers, which refill the
 	 * choices after it (a new device offers its own rates)
 	 */
-	if (!backend.empty () && !choose_in_combo (backend_combo, backend, "Backend", error)) {
-		return error;
-	}
-	if (!device.empty () && !choose_in_combo (device_combo, device, "Device", error)) {
-		return error;
-	}
-	if (!input_device.empty () && !choose_in_combo (input_device_combo, input_device, "Input device", error)) {
-		return error;
-	}
-	if (!output_device.empty () && !choose_in_combo (output_device_combo, output_device, "Output device", error)) {
-		return error;
-	}
-	if (sample_rate > 0 && !choose_in_combo (sample_rate_combo, rate_as_string (sample_rate), "Sample rate", error)) {
-		return error;
-	}
-	if (buffer_size > 0 && !choose_in_combo (buffer_size_combo, bufsize_as_string (buffer_size), "Buffer size", error)) {
-		return error;
+	bool chosen = (backend.empty () || choose_in_combo (backend_combo, backend, "Backend", error))
+	              && (device.empty () || choose_in_combo (device_combo, device, "Device", error))
+	              && (input_device.empty () || choose_in_combo (input_device_combo, input_device, "Input device", error))
+	              && (output_device.empty () || choose_in_combo (output_device_combo, output_device, "Output device", error))
+	              && (sample_rate <= 0 || choose_in_combo (sample_rate_combo, rate_as_string (sample_rate), "Sample rate", error))
+	              && (buffer_size == 0 || choose_in_combo (buffer_size_combo, bufsize_as_string (buffer_size), "Buffer size", error));
+
+	if (chosen) {
+		const int rv = push_state_to_backend (true);
+		if (rv == 0) {
+			/* the default for the next launch, as when the window is used */
+			ARDOUR::Config->add_extra_xml (get_state ());
+			ARDOUR::Config->save_state ();
+			return std::string ();
+		}
+		error = rv < 0 ? engine->get_last_backend_error () : std::string ("Could not configure the audio engine with these settings");
 	}
 
-	const int rv = push_state_to_backend (true);
-	if (rv < 0) {
-		return ARDOUR::AudioEngine::instance ()->get_last_backend_error ();
+	/* put back what was running */
+	if (before && set_current_state (before)) {
+		push_state_to_backend (true);
 	}
-	if (rv > 0) {
-		return "Could not configure the audio engine with these settings";
-	}
-
-	/* the default for the next launch, as when the window is used */
-	ARDOUR::Config->add_extra_xml (get_state ());
-	ARDOUR::Config->save_state ();
-
-	return std::string ();
+	return error.empty () ? std::string ("Could not configure the audio engine") : error;
 }
 
 void

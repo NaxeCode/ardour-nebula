@@ -249,6 +249,8 @@ public:
 	void control_protocol_open_session (std::string const& path, std::string const& snapshot, bool save_first);
 	void control_protocol_new_session (std::string const& path, std::string const& name, bool save_first);
 	std::string control_protocol_gui_request (std::string request, std::string arguments);
+	/* a sample rate mismatch that engine/set brought on is logged, not a modal dialog */
+	bool _quiet_sr_mismatch = false;
 
 	bool loading_session () const { return _loading_session; }
 
