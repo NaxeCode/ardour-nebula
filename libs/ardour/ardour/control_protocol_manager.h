@@ -87,6 +87,13 @@ public:
 	int activate (ControlProtocolInfo&, std::string const & config);
 	int deactivate (ControlProtocolInfo&);
 
+	/* Tools without a user interface (session utilities) turn this off:
+	 * no protocol is instantiated, and the stored protocol state is kept
+	 * as it was, active or not.
+	 */
+	void set_enabled (bool yn) { _enabled = yn; }
+	bool enabled () const { return _enabled; }
+
 	static const std::string state_node_name;
 
 	int      set_state (const XMLNode&, int version);
@@ -104,6 +111,7 @@ private:
 	mutable PBD::RWLock             _protocols_lock;
 	std::list<ControlProtocol*>     _control_protocols;
 	std::list<ControlProtocolInfo*> _control_protocol_info;
+	bool                            _enabled;
 
 	void session_going_away ();
 
