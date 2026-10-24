@@ -18,6 +18,22 @@ The DMG is built by GitHub Actions on the free `macos-15` arm64 runners:
 
 The DMG is unsigned. On first launch, right-click the app and choose Open.
 
+## Building on the Mac
+
+The same recipe runs locally, for checking a change in minutes instead of a
+CI run. On an M4 the stack takes about 50 minutes once (about 1 GB in
+`~/ardour-ci-work`), then Ardour about 11 minutes. waf calls `python`, which
+macOS doesn't have, so a link to `python3` goes in the work folder:
+
+```sh
+W=~/ardour-ci-work REV=3cbf14d1c2c556f327534141c848ff63460df91f
+mkdir -p $W/bin && ln -sf "$(command -v python3)" $W/bin/python
+git fetch --depth=30 origin "+refs/tags/9.8:refs/tags/9.8"   # waf reads the version from git describe
+PATH="$W/bin:$PATH" nice nebula/ardour-ci/bin/ardour-ci --source "$PWD" --work-dir $W --stack-rev $REV deps build
+PATH="$W/bin:$PATH" nice nebula/ardour-ci/bin/ardour-ci --source "$PWD" --work-dir $W --stack-rev $REV build
+PATH="$W/bin:$PATH" nebula/ardour-ci/bin/ardour-ci --source "$PWD" --work-dir $W --stack-rev $REV package   # a DMG
+```
+
 ## nebula/ardour-ci
 
 Vendored from [axsy/ardour-ci](https://github.com/axsy/ardour-ci) at
