@@ -121,6 +121,7 @@ ControlProtocolInfo::active () const
 }
 
 ControlProtocolManager::ControlProtocolManager ()
+	: _enabled (true)
 {
 }
 
@@ -163,7 +164,7 @@ ControlProtocolManager::set_session (Session* s)
 	}
 
 	for (auto const& p : _control_protocol_info) {
-		if (p->requested) {
+		if (p->requested && _enabled) {
 			(void)activate (*p, p->config);
 		}
 	}
@@ -293,7 +294,7 @@ ControlProtocolManager::instantiate (ControlProtocolInfo& cpi, std::string const
 {
 	/* CALLER MUST HOLD LOCK */
 
-	if (_session == 0) {
+	if (_session == 0 || !_enabled) {
 		return 0;
 	}
 
@@ -606,7 +607,9 @@ ControlProtocolManager::get_state () const
 			root->add_child_nocopy (child_state);
 		} else if (p->state) {
 			XMLNode* child_state = new XMLNode (*p->state);
-			child_state->set_property (X_("active"), false);
+			if (_enabled) {
+				child_state->set_property (X_("active"), false);
+			}
 			root->add_child_nocopy (*child_state);
 		} else {
 			XMLNode* child_state = new XMLNode (X_("Protocol"));

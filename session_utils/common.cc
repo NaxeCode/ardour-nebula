@@ -30,6 +30,7 @@
 #include "pbd/transmitter.h"
 
 #include "ardour/audioengine.h"
+#include "ardour/control_protocol_manager.h"
 #include "ardour/filename_extensions.h"
 #include "ardour/lua_api.h"
 #include "ardour/types.h"
@@ -120,6 +121,12 @@ SessionUtils::init (bool print_log)
 		cerr << "Ardour failed to initialize\n" << endl;
 		::exit (EXIT_FAILURE);
 	}
+
+	/* No user interface: do not start control surfaces. They would
+	 * fight over ports and devices with a running Ardour that has the
+	 * same session open.
+	 */
+	ControlProtocolManager::instance ().set_enabled (false);
 
 	event_loop = new MyEventLoop ("util");
 	EventLoop::set_event_loop_for_thread (event_loop);
