@@ -23,16 +23,17 @@
  * can't.
  */
 
+#include <cstdio>
 #include <sstream>
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
-#include <gtkmm/button.h>
-#include <gtkmm/dialog.h>
-#include <gtkmm/label.h>
-#include <gtkmm/messagedialog.h>
-#include <gtkmm/window.h>
+#include <ytkmm/button.h>
+#include <ytkmm/dialog.h>
+#include <ytkmm/label.h>
+#include <ytkmm/messagedialog.h>
+#include <ytkmm/window.h>
 
 #include "pbd/id.h"
 
@@ -43,11 +44,11 @@
 #include "gtkmm2ext/actions.h"
 
 #include "ardour_ui.h"
-#include "editor.h"
 #include "engine_dialog.h"
 #include "public_editor.h"
 #include "enums.h"
 #include "time_axis_view.h"
+#include "track_view_list.h"
 
 using namespace ARDOUR;
 
@@ -118,8 +119,8 @@ collect_labels (Gtk::Widget* w, std::vector<std::string>& texts)
 		return;
 	}
 	if (Gtk::Container* c = dynamic_cast<Gtk::Container*> (w)) {
-		std::vector<Gtk::Widget*> children = c->get_children ();
-		for (std::vector<Gtk::Widget*>::iterator i = children.begin (); i != children.end (); ++i) {
+		std::list<Gtk::Widget*> children = c->get_children ();
+		for (std::list<Gtk::Widget*>::iterator i = children.begin (); i != children.end (); ++i) {
 			collect_labels (*i, texts);
 		}
 	}
@@ -144,8 +145,8 @@ std::vector<Gtk::Button*>
 dialog_buttons (Gtk::Dialog* d)
 {
 	std::vector<Gtk::Button*> buttons;
-	std::vector<Gtk::Widget*> children = d->get_action_area ()->get_children ();
-	for (std::vector<Gtk::Widget*>::iterator i = children.begin (); i != children.end (); ++i) {
+	std::list<Gtk::Widget*> children = d->get_action_area ()->get_children ();
+	for (std::list<Gtk::Widget*>::iterator i = children.begin (); i != children.end (); ++i) {
 		Gtk::Button* b = dynamic_cast<Gtk::Button*> (*i);
 		if (b && b->get_visible ()) {
 			buttons.push_back (b);

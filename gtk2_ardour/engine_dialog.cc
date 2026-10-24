@@ -24,6 +24,7 @@
 
 #include <cmath>
 #include <exception>
+#include <algorithm>
 #include <map>
 #include <vector>
 

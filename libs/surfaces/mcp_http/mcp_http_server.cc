@@ -8747,7 +8747,9 @@ handle_tracks_group_tool (ARDOUR::Session& session, PBD::EventLoop* event_loop, 
 	run_in_event_loop (event_loop, [&] () {
 		std::shared_ptr<ARDOUR::RouteGroup> group = session.route_group_by_name (name);
 		if (!group) {
-			group   = session.new_route_group (name);
+			/* new_route_group only makes the group; the session must be told */
+			group = session.new_route_group (name);
+			session.add_route_group (group);
 			created = true;
 		}
 		for (std::vector<std::shared_ptr<ARDOUR::Route> >::iterator r = routes.begin (); r != routes.end (); ++r) {
